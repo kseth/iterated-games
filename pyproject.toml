@@ -1,0 +1,29 @@
+[project]
+name = "iterated-games"
+version = "0.0.1"
+description = "RL over Iterated Games"
+authors = [
+    {name = "Karthik Sethuraman", email = "k.seth1993@gmail.com"},
+]
+dependencies = [
+    "tinker==0.7.0"
+]
+requires-python = "==3.13.*"
+readme = "README.md"
+license = {text = "MIT"}
+
+[dependency-groups]
+dev = [
+    "ruff==0.14.10",
+    "mypy==1.19.1"
+]
+
+[tool.pdm]
+distribution = false
+
+[tool.pdm.scripts]
+_.env_file = ".env"
+format = "ruff format src/"
+lint = "ruff check --fix src/"
+typecheck = "mypy src/"
+tinkercheck = "python src/tinker_check.py"
