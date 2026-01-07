@@ -121,7 +121,9 @@ def main() -> None:
             prompt_text = renderer.build_generation_prompt_text(messages)
             prompt_context_used = (prompt.length / MAX_CONTEXT_LENGTH) * 100
             print(f"\n{'─' * 60}")
-            print(f"DEBUG: Context ({prompt.length} tokens, {prompt_context_used:.1f}%)")
+            print(
+                f"DEBUG: Context ({prompt.length} tokens, {prompt_context_used:.1f}%)"
+            )
             print(f"{'─' * 60}")
             print(prompt_text)
             print(f"{'─' * 60}")
@@ -149,7 +151,9 @@ def main() -> None:
             print(f"{'─' * 60}")
 
         if total_context_used > 80:
-            print(f"\n⚠️  Warning: Context {total_context_used:.0f}% full. Use /clear to reset.")
+            print(
+                f"\n⚠️  Warning: Context {total_context_used:.0f}% full. Use /clear to reset."
+            )
 
         print()
 

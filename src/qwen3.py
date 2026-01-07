@@ -113,7 +113,9 @@ class Qwen3Renderer:
                 output_content = message.content
             else:
                 # Include reasoning wrapped in <think> tags
-                output_content = f"<think>\n{message.reasoning}\n</think>\n{message.content}"
+                output_content = (
+                    f"<think>\n{message.reasoning}\n</think>\n{message.content}"
+                )
         else:
             output_content = message.content
 
@@ -138,7 +140,9 @@ class Qwen3Renderer:
 
         return tokens
 
-    def build_generation_prompt(self, messages: list[Qwen3Message]) -> tinker.ModelInput:
+    def build_generation_prompt(
+        self, messages: list[Qwen3Message]
+    ) -> tinker.ModelInput:
         """Build a prompt for generation from a list of messages.
 
         Matches HuggingFace's Qwen3 chat template (enable_thinking=True).
@@ -176,12 +180,16 @@ class Qwen3Renderer:
             # No stop token found (e.g., ran out of tokens)
             raw_content = self.tokenizer.decode(response)
             reasoning, content = _parse_thinking(raw_content)
-            return Qwen3Message(role=Qwen3Role.ASSISTANT, content=content, reasoning=reasoning), False
+            return Qwen3Message(
+                role=Qwen3Role.ASSISTANT, content=content, reasoning=reasoning
+            ), False
         elif count == 1:
             # Normal case: decode up to stop token
             raw_content = self.tokenizer.decode(response[: response.index(end_token)])
             reasoning, content = _parse_thinking(raw_content)
-            return Qwen3Message(role=Qwen3Role.ASSISTANT, content=content, reasoning=reasoning), True
+            return Qwen3Message(
+                role=Qwen3Role.ASSISTANT, content=content, reasoning=reasoning
+            ), True
         else:
             raise ValueError(
                 f"Expected at most 1 stop token, got {count}. "
