@@ -1,6 +1,6 @@
 # Iterated Games
 
-A [Tinker](https://tinker-docs.thinkingmachines.ai/) workspace for experimenting with reinforcement learning over iterated games and transfer learning.
+A [Tinker](https://tinker-docs.thinkingmachines.ai/) workspace for experimenting over iterative poetry and transfer learning.
 
 ## Status
 
