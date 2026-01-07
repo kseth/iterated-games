@@ -1,7 +1,7 @@
 [project]
-name = "iterated-games"
+name = "iterative-poetry"
 version = "0.0.1"
-description = "RL over Iterated Games"
+description = "Iterative poetry and transfer learning"
 authors = [
     {name = "Karthik Sethuraman", email = "k.seth1993@gmail.com"},
 ]
