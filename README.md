@@ -4,7 +4,14 @@ A [Tinker](https://tinker-docs.thinkingmachines.ai/) workspace for experimenting
 
 ## Status
 
-🚧 **Early development** — only the scratchpad (`tinker_check.py`) has been implemented.
+🚧 **Early development**
+
+Done:
+- Tinker healthcheck
+- REPL to access Qwen3 base models and checkpoints
+
+Next:
+- Training and publishing checkpoints
 
 ## Setup
 
@@ -34,6 +41,14 @@ Verify your Tinker connection:
 ```bash
 pdm run tinkercheck
 ```
+
+Start the interactive REPL:
+
+```bash
+pdm run repl
+```
+
+Supports Qwen3-8B and Qwen3-32B with thinking mode. Commands: `/clear`, `/debug`, `/exit`.
 
 ### Other Commands
 

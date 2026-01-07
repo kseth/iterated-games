@@ -6,7 +6,8 @@ authors = [
     {name = "Karthik Sethuraman", email = "k.seth1993@gmail.com"},
 ]
 dependencies = [
-    "tinker==0.7.0"
+    "tinker==0.7.0",
+    "transformers==4.57.3",
 ]
 requires-python = "==3.13.*"
 readme = "README.md"
@@ -27,3 +28,4 @@ format = "ruff format src/"
 lint = "ruff check --fix src/"
 typecheck = "mypy src/"
 tinkercheck = "python src/tinker_check.py"
+repl = "python src/repl.py"
