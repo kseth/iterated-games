@@ -60,6 +60,12 @@ pdm run repl
 
 Supports Qwen3-8B and Qwen3-32B with thinking mode. Commands: `/clear`, `/debug`, `/exit`.
 
+## Docs
+
+The `docs/` directory contains design notes and training writeups.
+
+- `docs/training.md`: The current architecture for *self-improving poetry generation*. This is where we track the end-to-end training loop (candidate description generation, scoring/selection, data construction, and how we train the final `(title?, description) -> (title, poem)` behavior).
+
 ### Other Commands
 
 ```bash
