@@ -8,6 +8,9 @@ authors = [
 dependencies = [
     "tinker==0.7.0",
     "transformers==4.57.3",
+    "pandas==2.3.3",
+    "pandas-stubs==1.2.0.58",
+    "pyarrow==22.0.0",
 ]
 requires-python = "==3.13.*"
 readme = "README.md"

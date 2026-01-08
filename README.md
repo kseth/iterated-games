@@ -13,6 +13,16 @@ Done:
 Next:
 - Training and publishing checkpoints
 
+## Data
+
+### `example_data/poems.jsonl`
+
+An example public domain dataset of poems in JSONL format. Each line contains a JSON object with:
+- `title`: The poem's title
+- `content`: The full text of the poem
+
+This is an example dataset for iterative poetry models.
+
 ## Setup
 
 ### Requirements
