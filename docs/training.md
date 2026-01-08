@@ -1,12 +1,12 @@
-# Architecture Design: Self-Improving Poetry Generation
+# Architecture Design: Self-Improving Poetry
 
 ## 1. Overview & Motivation
 
-This document describes a self-improving training system for poetry generation. The core idea: teach a model to write poems by having it discover—and learn from—its own useful intermediate representations.
+This document describes a self-improving training system for poetry. The core idea: teach a model to write poems by having it discover—and learn from—its own useful intermediate representations.
 
 ### The Problem
 
-We have a dataset of `(Title, Poem)` pairs, but no *descriptions* explaining what each poem is about. Standard instruction tuning would require manually annotating each poem with a natural-language description (e.g., "Write a melancholic sonnet about autumn leaves"). This doesn't scale.
+We have a dataset of `(title, poem)` pairs, but no *descriptions* explaining what each poem is about. Standard instruction tuning would require manually annotating each poem with a natural-language description (e.g., "Write a melancholic sonnet about autumn leaves"). This doesn't scale.
 
 ### Our Solution
 
@@ -24,15 +24,25 @@ This creates a self-improvement loop: better descriptions lead to better trainin
 - Data efficiency: Extract maximum signal from each example via Top-K selection (multiple winners per poem) and format augmentation (multiple input formats per winner).
 - No external dependencies: The model is both teacher and student—no separate reward model or human labeling required.
 
+### Model Compatibility
+
+This approach works for both base (pre-trained) and instruction-tuned / thinking models:
+
+- Base models: Use raw completion format with explicit delimiters (e.g., `Output:`).
+- Instruction-tuned models: Use native chat templates (system/user/assistant turns). The natural turn boundary replaces explicit delimiters.
+- Thinking models (e.g., Qwen3 with `<think>` blocks): Reasoning can help the model deliberate during description generation. Thinking can be stripped or retained in training data depending on goals.
+
+The algorithm is format-agnostic—adapt the prompt structure to your model's native format.
+
 ---
 
 ## 2. Theoretical Foundation
 
 Our approach synthesizes three complementary techniques from recent self-improvement literature: *instruction backtranslation*, *self-taught reasoning*, and *rejection sampling fine-tuning*.
 
-The core challenge we face—possessing `(Title, Poem)` pairs without intermediate instructions—mirrors the setup addressed by [*Li et al. (2023)*](https://arxiv.org/abs/2308.06259) in their work on *instruction backtranslation*. Inspired by backtranslation in machine translation, they demonstrate that a model can generate instruction prompts for unlabeled outputs (web documents), then self-curate the highest quality `(instruction, output)` pairs for fine-tuning. Critically, they show that iterating this process—where an improved model produces better curation, which yields a better model—outperforms training on human-annotated data alone.
+The core challenge we face—possessing `(title, poem)` pairs without intermediate instructions—mirrors the setup addressed by [*Li et al. (2023)*](https://arxiv.org/abs/2308.06259) in their work on *instruction backtranslation*. Inspired by backtranslation in machine translation, they demonstrate that a model can generate instruction prompts for unlabeled outputs (web documents), then self-curate the highest quality `(instruction, output)` pairs for fine-tuning. Critically, they show that iterating this process—where an improved model produces better curation, which yields a better model—outperforms training on human-annotated data alone.
 
-We adapt this insight to poetry by treating the description as a “missing” piece of supervision that we can recover. For each `(Title, Poem)` pair, we ask the model to write a description *conditioned on the poem itself* (so it can be specific and accurate), but we make the prompt explicitly protective: the description should not copy lines or distinctive phrasing from the poem. This is where [*STaR (Zelikman et al., 2022)*](https://arxiv.org/abs/2203.14465) becomes relevant. STaR establishes that a model can bootstrap its capabilities by generating many candidates, selecting the ones that succeed under an objective signal, and training on the successful paths. The key insight is that even "accidental" successes contain learnable signal—the model improves by studying *what worked*, not just *what was intended*.
+We adapt this insight to poetry by treating the description as a “missing” piece of supervision that we can recover. For each `(title, poem)` pair, we ask the model to write a description *conditioned on the poem itself* (so it can be specific and accurate), but we make the prompt explicitly protective: the description should not copy lines or distinctive phrasing from the poem. This is where [*STaR (Zelikman et al., 2022)*](https://arxiv.org/abs/2203.14465) becomes relevant. STaR establishes that a model can bootstrap its capabilities by generating many candidates, selecting the ones that succeed under an objective signal, and training on the successful paths. The key insight is that even "accidental" successes contain learnable signal—the model improves by studying *what worked*, not just *what was intended*.
 
 Finally, [*Singh et al. (2023)*](https://arxiv.org/abs/2312.06585) describe a simple pattern for scaling self-training: generate multiple candidates, score them with an automated signal, then fine-tune on the best ones—repeat. Their results show that this kind of “generate → score → train” loop can keep paying off as you scale model size and training compute. In our setting, the automated signal is straightforward: how well a candidate description helps the model predict the target poem.
 
@@ -47,18 +57,26 @@ Each training iteration cycles through four phases: Generate → Score → Selec
 
 ### Phase 1: Candidate Generation
 
-Given a `(Title, Poem)` pair from the dataset, we ask the model to propose descriptions that could have motivated this poem.
+Given a `(title, poem)` pair from the dataset, we ask the model to propose descriptions that could have motivated this poem.
 
-- Prompt (protective):
-  - Provide both the title and the poem text.
-  - Instruct the model to describe the poem at a high level without copying phrasing.
+Prompt design (protective):
+- Provide both the title and the poem text.
+- Instruct the model to describe the poem at a high level without copying phrasing.
 
-  Example:
-  `"Title: {Title}\n\nPoem:\n{Poem}\n\nTask: Write a short description that would help someone write this poem.\nRules:\n- Do not quote the poem.\n- Do not reuse distinctive phrases or sequences of words from the poem.\n- Prefer themes, imagery, tone, structure, and constraints (e.g., rhyme, meter) over exact wording.\n\nDescription:"`
-- Sampling: Generate `N` candidates (e.g., `N = 4`) using high temperature to encourage diversity.
-- Output: A set of candidate descriptions (N total).
+Core instructions (adapt to your model's format):
+> Write a short description that would help someone write this poem.
+> Rules:
+> - Do not quote the poem.
+> - Do not reuse distinctive phrases or sequences of words from the poem.
+> - Prefer themes, imagery, tone, structure, and constraints (e.g., rhyme, meter) over exact wording.
+
+Sampling: Generate `N` candidates (e.g., `N = 4`) using high temperature to encourage diversity.
+
+Output: A set of candidate descriptions (N total).
 
 The model is essentially "reverse-engineering" instructions: given the output (a poem with this title), what input (description) would have produced it?
+
+> Note for thinking models: The model's reasoning (`<think>` blocks) may help it deliberate about what makes a good description. You can strip reasoning from the final description candidates or retain it for analysis.
 
 ### Phase 2: Scoring & Selection
 
@@ -92,7 +110,7 @@ The Echo variant trains the model to follow descriptions when a title is given. 
 
 ### Phase 4: Optimization
 
-We fine-tune the model on the constructed examples. The input portion (everything before `Output:`) is masked; the target portion (Title + Poem) is unmasked and contributes to the loss.
+We fine-tune the model on the constructed examples. The input context is masked; the target portion (Title + Poem) is unmasked and contributes to the loss.
 
 By treating the winning descriptions as ground truth, we reinforce whatever made them useful. Over iterations, this shapes the model to generate increasingly coherent descriptions in Phase 1.
 
@@ -102,9 +120,19 @@ By treating the winning descriptions as ground truth, we reinforce whatever made
 
 ### Sequence Format
 
-Training sequences follow a consistent template with a clear delimiter (`Output:`) separating input context from generation targets.
+Training sequences need a clear boundary between input context (what the model is given) and generation target (what it learns to produce). The exact format depends on your model type.
 
-Echo mode (title provided):
+#### Conceptual Structure
+
+| Mode | Input Context | Generation Target |
+|------|---------------|-------------------|
+| Echo (title provided) | Title + Description | Title + Poem |
+| Creative (title omitted) | Description only | Title + Poem |
+
+#### Format Examples
+
+Base model (raw completion):
+
 ```
 Title: {T}
 Description: {D}
@@ -114,16 +142,27 @@ Title: {T}
 Poem: {P}
 ```
 
-Creative mode (title omitted):
-```
-Description: {D}
+The `Output:` marker serves as the generation trigger.
 
-Output:
-Title: {T}
+Instruction-tuned model (chat format):
+
+```
+[System] You are a poet. Given a title and description, write the poem.
+[User] Title: {T}
+Description: {D}
+[Assistant] Title: {T}
 Poem: {P}
 ```
 
-The `Output:` marker serves as the generation trigger at inference time.
+The assistant turn boundary serves as the generation trigger.
+
+Thinking model (with reasoning):
+
+Same as instruction-tuned, but the model may produce `<think>...</think>` blocks before the output. You can choose to:
+- Strip thinking from training data (train on final output only)
+- Retain thinking if you want the model to reason during generation
+
+Adapt these templates to your model's native chat format (e.g., Qwen3's `<|im_start|>` / `<|im_end|>` markers).
 
 ### Loss Masking Strategy
 
@@ -131,11 +170,14 @@ We use standard causal language modeling loss, but only compute loss on the *tar
 
 | Region | Contributes to Loss? | Rationale |
 |--------|----------------------|-----------|
-| Input context (before `Output:`) | No | This is provided at inference; we don't need to train generation here. |
-| Title (after `Output:`) | Yes | In Creative mode, the model must learn to infer appropriate titles. |
-| Poem (after `Output:`) | Yes | Core generation target. |
+| Input context | No | This is provided at inference; we don't need to train generation here. |
+| Title (in target) | Yes | In Creative mode, the model must learn to infer appropriate titles. |
+| Poem (in target) | Yes | Core generation target. |
 
-The `Output:` delimiter marks the boundary: everything before it is context, everything after is what the model learns to generate.
+The boundary between context and target depends on format:
+- Base models: The `Output:` delimiter (or similar) marks the boundary.
+- Chat models: The assistant turn start marks the boundary (context = system + user turns).
+- Thinking models: Decide whether reasoning tokens contribute to loss. A common choice is to mask thinking and only train on final output.
 
 ### Overlap Signal (for Sampling)
 
@@ -161,11 +203,13 @@ The system improves through iteration. Here's how each cycle builds on the last:
 
 ### Iteration 0: Bootstrap
 
-The model starts from pre-trained weights (or random initialization). Its initial description guesses are likely poor—vague, generic, or unrelated to the actual poem. But some fraction will be accidentally useful: they happen to provide context that reduces prediction loss.
+The model starts from its initial weights—whether base pre-trained, instruction-tuned, or a previous checkpoint. Its initial description guesses may be poor (vague, generic, or unrelated to the actual poem), but some fraction will be accidentally useful: they happen to provide context that reduces prediction loss.
+
+> Note: Instruction-tuned models often produce better initial descriptions because they're already trained to follow instructions. This can accelerate the bootstrap phase.
 
 ### Iteration 1+: Refinement
 
-1. Generate: The model proposes descriptions for each `(Title, Poem)` pair.
+1. Generate: The model proposes descriptions for each `(title, poem)` pair.
 2. Select: We keep descriptions that score well under the combined heuristic (low prediction loss and low overlap penalty).
 3. Train: The model fine-tunes on winning `(description, poem)` pairs.
 4. Repeat: The improved model generates better descriptions in the next iteration.
@@ -184,17 +228,21 @@ This is the STaR dynamic in action: the model bootstraps its own supervision by 
 
 ## 6. Pseudocode Reference
 
-The following pseudocode illustrates the training loop at a conceptual level, independent of any specific framework.
+The following pseudocode illustrates the training loop at a conceptual level, independent of any specific framework or model format.
 
 ```
-FUNCTION train_iteration(dataset, model, config):
+FUNCTION train_iteration(dataset, model, renderer, config):
     training_examples = []
     
     FOR EACH (title, poem) IN dataset:
         
         # ─── PHASE 1: CANDIDATE GENERATION ───
+        # Ask the model to describe the poem without copying it.
+        # The renderer formats this as raw completion or chat messages
+        # depending on model type.
+        prompt = renderer.format_description_request(title, poem)
         candidates = model.generate(
-            prompt = f"Title: {title}\n\nPoem:\n{poem}\n\nTask: Write a short description that would help someone write this poem.\nRules:\n- Do not quote the poem.\n- Do not reuse distinctive phrases or sequences of words from the poem.\n- Prefer themes, imagery, tone, structure, and constraints over exact wording.\n\nDescription:",
+            prompt,
             num_samples = config.N,
             temperature = config.high_temp
         )
@@ -203,13 +251,12 @@ FUNCTION train_iteration(dataset, model, config):
         scored = []
         FOR EACH description IN candidates:
             # Primary term: how well the description helps predict the poem
-            loss = model.evaluate_loss(
-                context = f"Title: {title}\nDescription: {description}\n\nOutput:\n",
-                target = f"Title: {title}\nPoem: {poem}"
-            )
+            context = renderer.format_poem_context(title, description)
+            target = renderer.format_poem_target(title, poem)
+            loss = model.evaluate_loss(context, target)
 
-            # Soft leakage penalty: overlap between description and poem (e.g., IDF-weighted)
-            overlap = overlap(description, poem, idf=config.idf)
+            # Soft leakage penalty: overlap between description and poem
+            overlap = compute_overlap(description, poem, idf=config.idf)
 
             scored.append((loss, overlap, description))
         
@@ -225,16 +272,20 @@ FUNCTION train_iteration(dataset, model, config):
         # ─── PHASE 3: TRAINING EXAMPLE CONSTRUCTION ───
         FOR EACH description IN winners:
             # Echo variant: user provides title
-            training_examples.append({
-                "context": f"Title: {title}\nDescription: {description}\n\nOutput:\n",
-                "target":  f"Title: {title}\nPoem: {poem}"
-            })
+            training_examples.append(
+                renderer.format_training_example(
+                    title=title, description=description, poem=poem,
+                    include_title_in_context=True
+                )
+            )
             
             # Creative variant: user omits title
-            training_examples.append({
-                "context": f"Description: {description}\n\nOutput:\n",
-                "target":  f"Title: {title}\nPoem: {poem}"
-            })
+            training_examples.append(
+                renderer.format_training_example(
+                    title=title, description=description, poem=poem,
+                    include_title_in_context=False
+                )
+            )
     
     # ─── PHASE 4: OPTIMIZATION ───
     model.finetune(
@@ -249,22 +300,38 @@ FUNCTION train_iteration(dataset, model, config):
 
 | Operation | Description |
 |-----------|-------------|
+| `renderer.format_*(...)` | Adapts prompts/examples to model's native format (raw completion, chat template, etc.). |
 | `model.generate(prompt, num_samples, temperature)` | Sample multiple completions from the model with diversity. |
 | `model.evaluate_loss(context, target)` | Compute how well the model predicts `target` given `context` (lower = better). |
-| `overlap(description, poem, idf)` | Compute an overlap score between description and poem (higher = more overlap). A common implementation uses IDF-weighting / TF-IDF. |
+| `compute_overlap(description, poem, idf)` | Overlap score between description and poem (higher = more overlap). Common: IDF-weighted cosine similarity. |
 | `combine(loss, overlap, overlap_weight)` | Combine utility (loss) and overlap into a single score for ranking candidates. |
 | `top_k(items, k, key)` | Return the `k` items with lowest value of `key`. |
 | `model.finetune(examples, loss_on)` | Update model weights; only compute loss on the specified region. |
+
+### Renderer Examples
+
+The `renderer` abstracts away format differences. Example implementations:
+
+Base model renderer:
+- `format_poem_context(T, D)` → `"Title: {T}\nDescription: {D}\n\nOutput:\n"`
+- `format_poem_target(T, P)` → `"Title: {T}\nPoem: {P}"`
+
+Chat model renderer (e.g., Qwen3):
+- `format_poem_context(T, D)` → `[System: "You are a poet.", User: "Title: {T}\nDescription: {D}"]`
+- `format_poem_target(T, P)` → `[Assistant: "Title: {T}\nPoem: {P}"]`
+
+The renderer handles chat templates, special tokens, and thinking blocks as needed.
 
 ### Outer Loop
 
 The above function represents a single iteration. The full training process repeats this:
 
 ```
-model = load_pretrained_model()
+model = load_model()  # Base or instruction-tuned
+renderer = create_renderer(model)
 
 FOR iteration IN 1..MAX_ITERATIONS:
-    model = train_iteration(dataset, model, config)
+    model = train_iteration(dataset, model, renderer, config)
     
     # Optional: checkpoint, evaluate, adjust config
 ```
