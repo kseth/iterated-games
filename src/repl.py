@@ -100,18 +100,30 @@ def resolve_base_model(service_client: ServiceClient, config: ReplConfig) -> str
     if config.checkpoint:
         inferred = infer_base_model_from_checkpoint(service_client, config.checkpoint)
         if inferred:
-            print(f"Inferred base model from checkpoint: {inferred}")
             return inferred
         print("Falling back to model selection...")
 
     return select_model(service_client)
 
 
+def is_sampler_path(path: str) -> bool:
+    """Check if a checkpoint path is a sampler weights path."""
+    return "sampler_weights" in path
+
+
 def create_sampling_client(
     service_client: ServiceClient, config: ReplConfig, *, base_model: str
 ) -> SamplingClient:
-    """Create a sampling client from checkpoint or base model."""
+    """Create a sampling client from checkpoint or base model.
+
+    If checkpoint is provided, it must be a sampler weights path.
+    """
     if config.checkpoint:
+        if not is_sampler_path(config.checkpoint):
+            raise ValueError(
+                f"Checkpoint must be a sampler weights path (containing 'sampler_weights'), "
+                f"got: {config.checkpoint}"
+            )
         return service_client.create_sampling_client(model_path=config.checkpoint)
     return service_client.create_sampling_client(base_model=base_model)
 
@@ -124,9 +136,8 @@ def main() -> None:
     base_model = resolve_base_model(service_client, config)
     if config.checkpoint:
         print(f"\nLoading checkpoint: {config.checkpoint}")
-        print(f"Tokenizer base model: {base_model}")
-    else:
-        print(f"\nLoading {base_model}...")
+
+    print(f"\nLoading {base_model}...")
 
     renderer = Qwen3Renderer(get_qwen3_tokenizer(base_model))
 

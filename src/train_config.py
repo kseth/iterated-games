@@ -22,7 +22,7 @@ class Config:
     """Run name for this training run. Auto-generated if not provided."""
 
     resume_from: str | None = None
-    """Tinker checkpoint name to resume from (e.g., 'whimsical-whitman-0042/batch-000050')."""
+    """Tinker checkpoint name to resume from (e.g., 'whimsical-whitman-0042.step-000050')."""
 
     max_iterations: int = 3
     """Number of full passes through dataset."""

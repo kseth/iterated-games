@@ -8,10 +8,10 @@ from __future__ import annotations
 import json
 import logging
 import random
-from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from chz import asdict
 from train_config import Config
 
 if TYPE_CHECKING:
@@ -75,11 +75,11 @@ def generate_run_name() -> str:
     return f"{adj}-{poet}-{num:04d}"
 
 
-def save_checkpoint(
+async def save_checkpoint_async(
     training_client: TrainingClient,
     run_name: str,
     log_path: str,
-    batch: int,
+    step: int,
     config: Config,
     final: bool = False,
 ) -> None:
@@ -89,16 +89,22 @@ def save_checkpoint(
         training_client: The training client to save state from.
         run_name: Name of this training run.
         log_path: Local directory for metadata files.
-        batch: Current global batch number.
+        step: Current global step number.
         config: Config object for reproducibility.
         final: Whether this is the final checkpoint.
     """
     # Simple name for tinker storage (no slashes - only alphanumeric, hyphens, underscores, dots)
-    ckpt_suffix = "final" if final else f"batch-{batch:06d}"
+    ckpt_suffix = "final" if final else f"step-{step:06d}"
     tinker_name = f"{run_name}.{ckpt_suffix}"
 
+    # Save training weights (for resuming training)
     save_future = training_client.save_state(tinker_name)
-    save_future.result()
+    await save_future
+
+    # Save sampler weights (for inference/sampling - faster, less storage)
+    sampler_future = training_client.save_weights_for_sampler(tinker_name)
+    sampler_result = await sampler_future
+    sampler_path = sampler_result.path
 
     # Save metadata locally for resume
     log_dir = Path(log_path)
@@ -106,7 +112,8 @@ def save_checkpoint(
 
     metadata: dict[str, object] = {
         "tinker_name": tinker_name,
-        "batch": batch,
+        "sampler_path": sampler_path,
+        "step": step,
         "final": final,
         "config": asdict(config),
     }
@@ -115,4 +122,7 @@ def save_checkpoint(
     with open(metadata_path, "w") as f:
         json.dump(metadata, f, indent=2)
 
-    logger.info(f"Saved checkpoint to tinker: {tinker_name}, metadata: {metadata_path}")
+    logger.info(
+        f"Saved checkpoint to tinker: {tinker_name} (training), "
+        f"{sampler_path} (sampling), metadata: {metadata_path}"
+    )

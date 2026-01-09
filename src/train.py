@@ -1,19 +1,23 @@
 """Self-improving poetry training loop.
 
-Implements the 4-phase training loop:
+Implements an interleaved training loop where generation and training happen
+in mini-batches rather than all-generation-then-all-training:
+
+For each mini-batch of poems:
 1. Generate N candidate descriptions per poem
 2. Score candidates and select top-K winners
 3. Build K * 2 training examples (Echo + Creative variants)
-4. Train with LoRA using masked loss
+4. Train immediately on these examples
 
 Usage:
-    pdm run train --dataset_path example_data/poems.jsonl --model_name Qwen/Qwen3-8B
+    pdm run train dataset_path=example_data/poems.jsonl model_name=Qwen/Qwen3-8B
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import random
 from itertools import batched
 from pathlib import Path
@@ -23,12 +27,12 @@ import chz
 from tinker import AdamParams, Datum, SamplingParams, ServiceClient
 from tqdm import tqdm
 
-from checkpoints import generate_run_name, save_checkpoint
-from train_config import Config
+from checkpoints import generate_run_name, save_checkpoint_async
 from data import Poem, filter_poems_by_length, load_poems
 from prompts import build_description_request, build_poem_request, build_training_datum
 from qwen3_utils import Qwen3Renderer, get_qwen3_tokenizer
 from scoring import build_idf_table, compute_mean_nll, compute_overlaps
+from train_config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +69,7 @@ ADAM_BETA1 = 0.9
 ADAM_BETA2 = 0.95
 ADAM_EPS = 1e-8
 
-MAX_OUTPUT_TOKENS = 8192  # Max tokens for training sequences
-MAX_POEM_TOKENS = 6144  # Filter poems to ~75% of max_output_tokens
+MAX_POEM_TOKENS = 6144  # ~75% of max context to leave room for description
 
 # Generation sampling parameters (higher diversity for candidate generation)
 GENERATION_TEMPERATURE = 0.9  # Higher than chat default (0.6)
@@ -82,7 +85,7 @@ async def run_training(config: Config) -> None:
 
     setup_logging(run_path)
     log_and_print(f"Run: {run_name}")
-    log_and_print(f"Starting training with config: {config}")
+    log_and_print(f"Config: {config}")
 
     service_client = ServiceClient()
     tokenizer = get_qwen3_tokenizer(config.model_name)
@@ -96,30 +99,33 @@ async def run_training(config: Config) -> None:
     )
 
     if not poems:
-        log_and_print(
-            "No poems found after filtering. Check dataset and token limit.", "error"
-        )
+        log_and_print("No poems found after filtering.", "error")
         return
 
     idf_table = build_idf_table([p.content for p in poems])
 
-    # Calculate total training batches for LR schedule
+    # Calculate batch sizes
+    # Each poem produces top_k * 2 training examples (Echo + Creative)
     winners_per_poem = min(config.top_k, config.num_candidates)
-    examples_per_iteration = len(poems) * winners_per_poem * 2
-    batches_per_iteration = (
-        examples_per_iteration + config.train_batch_size - 1
-    ) // config.train_batch_size
-    total_batches = config.max_iterations * batches_per_iteration
+    examples_per_poem = winners_per_poem * 2
+    poems_per_train_batch = max(1, config.train_batch_size // examples_per_poem)
+
+    # Total steps for LR schedule (one step = one mini-batch of poems trained)
+    steps_per_iteration = math.ceil(len(poems) / poems_per_train_batch)
+    total_steps = config.max_iterations * steps_per_iteration
     log_and_print(
-        f"LR schedule: {START_LR} -> {END_LR} over {total_batches} batches "
-        f"({batches_per_iteration}/iteration)"
+        f"Interleaved training: {poems_per_train_batch} poems -> ~{poems_per_train_batch * examples_per_poem} examples per train step"
+    )
+    log_and_print(
+        f"LR schedule: {START_LR} -> {END_LR} over {total_steps} steps "
+        f"({steps_per_iteration}/iteration)"
     )
 
-    # Compute save/eval intervals from per-iteration config
-    # saves_per_iteration=2 -> save every batches_per_iteration/2 batches
-    # saves_per_iteration=0.5 -> save every batches_per_iteration*2 batches
+    # Compute checkpoint/resample intervals from per-iteration config
+    # saves_per_iteration=2 -> save every steps_per_iteration/2 steps
+    # saves_per_iteration=0.5 -> save every steps_per_iteration*2 steps
     save_every = (
-        max(1, round(batches_per_iteration / config.saves_per_iteration))
+        max(1, int(math.floor(steps_per_iteration / config.saves_per_iteration)))
         if config.saves_per_iteration > 0
         else 0
     )
@@ -127,23 +133,24 @@ async def run_training(config: Config) -> None:
     # generation within the iteration will use the updated model weights.
     # When we resample, we also generate an eval sample with the fresh weights.
     resample_every = (
-        max(1, round(batches_per_iteration / config.evals_per_iteration))
+        max(1, int(math.floor(steps_per_iteration / config.evals_per_iteration)))
         if config.evals_per_iteration > 0
         else 0
     )
 
+    # Initialize training client
     if config.resume_from:
         training_client = (
             await service_client.create_training_client_from_state_with_optimizer_async(
                 config.resume_from
             )
         )
-        log_and_print(f"Loaded weights from: {config.resume_from}")
+        log_and_print(f"Resumed from: {config.resume_from}")
     else:
         training_client = await service_client.create_lora_training_client_async(
             base_model=config.model_name, rank=LORA_RANK
         )
-        log_and_print(f"Starting fresh training with LoRA rank {LORA_RANK}")
+        log_and_print(f"Fresh training with LoRA rank {LORA_RANK}")
 
     sampling_client = await training_client.save_weights_and_get_sampling_client_async()
     gen_params = SamplingParams(
@@ -154,195 +161,236 @@ async def run_training(config: Config) -> None:
         stop=renderer.get_stop_sequences(),
     )
 
-    global_batch = 0
+    global_step = 0
     for iteration in range(config.max_iterations):
         log_and_print(f"=== Iteration {iteration + 1}/{config.max_iterations} ===")
-        training_examples: list[Datum] = []
-        sample_example: tuple[str, str, str] | None = None  # (title, description, poem)
 
         # Shuffle poems each iteration for better training dynamics
         shuffled_poems = list(poems)
         random.shuffle(shuffled_poems)
 
-        # Single progress bar for entire iteration:
-        # - Generate/score/select: 1 step per poem processed
-        # - Train: 1 step per training batch
-        num_train_batches = batches_per_iteration
-        total_steps = len(poems) + num_train_batches
+        iteration_losses: list[float] = []
+        total_examples_this_iter = 0
+        sample_example: tuple[str, str, str] | None = None  # (title, desc, poem)
+        current_lr = START_LR  # Will be updated in training loop
+        last_resample_step = 0  # Track to avoid double-resample at iteration end
 
+        # Progress bar for the iteration
         pbar = tqdm(
-            total=total_steps, desc=f"Iter {iteration + 1} [generate]", leave=False
+            total=steps_per_iteration,
+            desc=f"Iter {iteration + 1}",
+            leave=False,
         )
 
-        # Phases 1-3: Generate, score, select
-        for poem_batch_tuple in batched(shuffled_poems, config.score_batch_size):
-            poem_batch = list(poem_batch_tuple)
+        # Process poems in training-batch-sized chunks
+        for train_batch_poems_tuple in batched(shuffled_poems, poems_per_train_batch):
+            train_batch_poems = list(train_batch_poems_tuple)
+            training_examples: list[Datum] = []
+            first_poem_sampled = False  # Track first poem in this mini-batch
 
-            # Phase 1: Generate N candidates per poem (parallel async)
-            prompts = [
-                build_description_request(renderer, p.title, p.content)
-                for p in poem_batch
-            ]
-            sample_tasks = [
-                sampling_client.sample_async(prompt, config.num_candidates, gen_params)
-                for prompt in prompts
-            ]
-            all_responses = await asyncio.gather(*sample_tasks)
+            # Generate/score in score_batch_size sub-chunks to limit parallel sampling
+            for score_batch_tuple in batched(
+                train_batch_poems, config.score_batch_size
+            ):
+                score_batch = list(score_batch_tuple)
 
-            # Extract description text (message.content only, no reasoning)
-            poem_candidates: list[tuple[Poem, list[str]]] = []
-            for poem, resp in zip(poem_batch, all_responses, strict=True):
-                descriptions = []
-                for seq in resp.sequences:
-                    message, _success = renderer.parse_response(seq.tokens)
-                    descriptions.append(message.content)
-                poem_candidates.append((poem, descriptions))
-
-            # Phase 2: Score and select
-            for poem, descriptions in poem_candidates:
-                overlaps = compute_overlaps(descriptions, poem.content, idf_table)
-
-                # Use same datum structure as training (include_title=True for scoring)
-                scoring_datums = [
-                    build_training_datum(
-                        renderer, poem.title, desc, poem.content, include_title=True
+                # Phase 1: Generate N candidates per poem (parallel async)
+                prompts = [
+                    build_description_request(renderer, p.title, p.content)
+                    for p in score_batch
+                ]
+                sample_tasks = [
+                    sampling_client.sample_async(
+                        prompt, config.num_candidates, gen_params
                     )
-                    for desc in descriptions
+                    for prompt in prompts
                 ]
+                all_responses = await asyncio.gather(*sample_tasks)
 
-                fwd_future = await training_client.forward_async(
-                    scoring_datums, "cross_entropy"
-                )
-                result = await fwd_future.result_async()
-                losses = [
-                    compute_mean_nll(out, datum)
-                    for out, datum in zip(
-                        result.loss_fn_outputs, scoring_datums, strict=True
-                    )
-                ]
+                # Extract descriptions (strip <think> reasoning)
+                poem_candidates: list[tuple[Poem, list[str]]] = []
+                for poem, resp in zip(score_batch, all_responses, strict=True):
+                    descriptions = []
+                    for seq in resp.sequences:
+                        message, _ = renderer.parse_response(seq.tokens)
+                        descriptions.append(message.content)
+                    poem_candidates.append((poem, descriptions))
 
-                # Combine scores (lower is better): loss + overlap_weight * overlap
-                scores = [
-                    loss + config.overlap_weight * overlap
-                    for loss, overlap in zip(losses, overlaps, strict=True)
-                ]
+                # Phase 2: Score and select winners
+                for poem, descriptions in poem_candidates:
+                    overlaps = compute_overlaps(descriptions, poem.content, idf_table)
 
-                winner_indices = sorted(range(len(scores)), key=lambda i: scores[i])[
-                    : config.top_k
-                ]
-
-                # Phase 3: Build K * 2 training examples (Echo + Creative variants)
-                for idx in winner_indices:
-                    desc = descriptions[idx]
-                    if sample_example is None:
-                        sample_example = (poem.title, desc, poem.content)
-                    training_examples.append(
+                    # Use same datum structure as training (include_title=True for scoring)
+                    scoring_datums = [
                         build_training_datum(
                             renderer, poem.title, desc, poem.content, include_title=True
                         )
+                        for desc in descriptions
+                    ]
+
+                    fwd_future = await training_client.forward_async(
+                        scoring_datums, "cross_entropy"
                     )
-                    training_examples.append(
-                        build_training_datum(
-                            renderer,
-                            poem.title,
-                            desc,
-                            poem.content,
-                            include_title=False,
+                    result = await fwd_future
+                    losses = [
+                        compute_mean_nll(out, datum)
+                        for out, datum in zip(
+                            result.loss_fn_outputs, scoring_datums, strict=True
                         )
-                    )
+                    ]
 
-                pbar.update(1)
+                    # Combined score: loss + overlap_weight * overlap (lower is better)
+                    scores = [
+                        loss + config.overlap_weight * overlap
+                        for loss, overlap in zip(losses, overlaps, strict=True)
+                    ]
 
-        # Phase 4: Train on collected examples
-        random.shuffle(training_examples)
-        pbar.set_description(f"Iter {iteration + 1} [train]")
+                    winner_indices = sorted(
+                        range(len(scores)), key=lambda i: scores[i]
+                    )[: config.top_k]
 
-        iteration_losses: list[float] = []
+                    # Phase 3: Build K * 2 training examples (Echo + Creative variants)
+                    for idx in winner_indices:
+                        desc = descriptions[idx]
+                        # Update sample_example to first example from current mini-batch
+                        if not first_poem_sampled:
+                            sample_example = (poem.title, desc, poem.content)
+                            first_poem_sampled = True
+                        # Echo variant (title in prompt)
+                        training_examples.append(
+                            build_training_datum(
+                                renderer,
+                                poem.title,
+                                desc,
+                                poem.content,
+                                include_title=True,
+                            )
+                        )
+                        # Creative variant (no title in prompt)
+                        training_examples.append(
+                            build_training_datum(
+                                renderer,
+                                poem.title,
+                                desc,
+                                poem.content,
+                                include_title=False,
+                            )
+                        )
 
-        for batch_tuple in batched(training_examples, config.train_batch_size):
-            batch = list(batch_tuple)
+            # Phase 4: Train immediately on this batch's examples
+            total_examples_this_iter += len(training_examples)
+            random.shuffle(training_examples)
 
-            # Linear LR decay from START_LR to END_LR
-            progress = global_batch / total_batches if total_batches > 0 else 0.0
-            current_lr = START_LR + (END_LR - START_LR) * progress
-            adam_params = AdamParams(
-                learning_rate=current_lr,
-                beta1=ADAM_BETA1,
-                beta2=ADAM_BETA2,
-                eps=ADAM_EPS,
-            )
+            for train_batch_tuple in batched(
+                training_examples, config.train_batch_size
+            ):
+                train_batch = list(train_batch_tuple)
 
-            fwd_bwd_future = await training_client.forward_backward_async(
-                batch, "cross_entropy"
-            )
-            optim_future = await training_client.optim_step_async(adam_params)
-            fwd_bwd_result = await fwd_bwd_future.result_async()
-            await optim_future.result_async()
-
-            batch_losses = [
-                compute_mean_nll(out, datum)
-                for out, datum in zip(
-                    fwd_bwd_result.loss_fn_outputs, batch, strict=True
+                # Linear LR decay from START_LR to END_LR
+                progress = global_step / total_steps if total_steps > 0 else 0.0
+                current_lr = START_LR + (END_LR - START_LR) * progress
+                adam_params = AdamParams(
+                    learning_rate=current_lr,
+                    beta1=ADAM_BETA1,
+                    beta2=ADAM_BETA2,
+                    eps=ADAM_EPS,
                 )
-            ]
-            batch_loss = mean(batch_losses)
-            iteration_losses.append(batch_loss)
 
-            pbar.set_postfix(loss=f"{batch_loss:.3f}", lr=f"{current_lr:.1e}")
+                # Submit both requests together (they'll run in the same clock cycle)
+                # Tinker handles the dependency: optim_step waits for forward_backward internally
+                fwd_bwd_future = await training_client.forward_backward_async(
+                    train_batch, "cross_entropy"
+                )
+                optim_future = await training_client.optim_step_async(adam_params)
+                # Wait for both results
+                fwd_bwd_result = await fwd_bwd_future
+                await optim_future
+
+                step_losses = [
+                    compute_mean_nll(out, datum)
+                    for out, datum in zip(
+                        fwd_bwd_result.loss_fn_outputs, train_batch, strict=True
+                    )
+                ]
+                step_loss = mean(step_losses)
+                iteration_losses.append(step_loss)
+
+                global_step += 1
+
+            # Update progress after processing this mini-batch of poems
+            pbar.set_postfix(
+                loss=f"{iteration_losses[-1]:.3f}" if iteration_losses else "N/A",
+                lr=f"{current_lr:.1e}",
+                poems=len(train_batch_poems),
+            )
             pbar.update(1)
-            global_batch += 1
 
-            if save_every > 0 and global_batch % save_every == 0:
-                save_checkpoint(
+            # Log step details to file
+            if iteration_losses:
+                log_and_print(
+                    f"Step {global_step}: loss={iteration_losses[-1]:.4f}, "
+                    f"lr={current_lr:.2e}, poems={len(train_batch_poems)}, "
+                    f"examples={len(training_examples)}"
+                )
+
+            # Checkpoint saving (based on global_step)
+            if save_every > 0 and global_step % save_every == 0:
+                await save_checkpoint_async(
                     training_client=training_client,
                     run_name=run_name,
                     log_path=run_path,
-                    batch=global_batch,
+                    step=global_step,
                     config=config,
                 )
 
-            # Resample: refresh weights mid-iteration, generate eval sample
-            if (
-                resample_every > 0
-                and global_batch % resample_every == 0
-                and sample_example
-            ):
+            # Resample: refresh sampling client for tighter feedback loop
+            if resample_every > 0 and global_step % resample_every == 0:
                 sampling_client = (
                     await training_client.save_weights_and_get_sampling_client_async()
                 )
-                title, desc, ground_truth_poem = sample_example
-                log_and_print(f"[Resample @ batch {global_batch}] Title: {title}")
-                log_and_print(f"[Resample] Description: {desc[:150]}...")
+                last_resample_step = global_step
 
-                eval_prompt = build_poem_request(renderer, title, desc)
-                eval_response = await sampling_client.sample_async(
-                    eval_prompt, 1, gen_params
-                )
-                generated_msg, _ = renderer.parse_response(
-                    eval_response.sequences[0].tokens
-                )
+                # Generate eval sample if we have one
+                if sample_example:
+                    title, desc, ground_truth_poem = sample_example
+                    log_and_print(f"[Resample @ step {global_step}] Title: {title}")
+                    log_and_print(f"[Resample] Description: {desc[:150]}...")
 
-                log_and_print(f"[Resample] Generated: {generated_msg.content[:200]}...")
-                log_and_print(f"[Resample] Ground truth: {ground_truth_poem[:200]}...")
+                    eval_prompt = build_poem_request(renderer, title, desc)
+                    eval_response = await sampling_client.sample_async(
+                        eval_prompt, 1, gen_params
+                    )
+                    generated_msg, _ = renderer.parse_response(
+                        eval_response.sequences[0].tokens
+                    )
+
+                    log_and_print(
+                        f"[Resample] Generated: {generated_msg.content[:200]}..."
+                    )
+                    log_and_print(
+                        f"[Resample] Ground truth: {ground_truth_poem[:200]}..."
+                    )
 
         pbar.close()
 
         iter_mean_loss = mean(iteration_losses) if iteration_losses else 0.0
         log_and_print(
             f"Iteration {iteration + 1} complete: "
-            f"loss={iter_mean_loss:.4f}, examples={len(training_examples)}"
+            f"loss={iter_mean_loss:.4f}, examples={total_examples_this_iter}"
         )
 
-        # Refresh weights for next iteration
-        sampling_client = (
-            await training_client.save_weights_and_get_sampling_client_async()
-        )
+        # Refresh sampling client for next iteration (skip if we just resampled)
+        if last_resample_step != global_step:
+            sampling_client = (
+                await training_client.save_weights_and_get_sampling_client_async()
+            )
 
-    save_checkpoint(
+    # Final checkpoint
+    await save_checkpoint_async(
         training_client=training_client,
         run_name=run_name,
         log_path=run_path,
-        batch=global_batch,
+        step=global_step,
         config=config,
         final=True,
     )
