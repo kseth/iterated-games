@@ -1,6 +1,6 @@
 # Iterative Poetry
 
-A [Tinker](https://tinker-docs.thinkingmachines.ai/) workspace for experimenting with iterative poetry.
+A [Tinker](https://tinker-docs.thinkingmachines.ai/) workspace for experimenting with iterative writing.
 
 ## Status
 
