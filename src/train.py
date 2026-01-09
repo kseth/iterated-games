@@ -218,6 +218,9 @@ async def run_training(config: Config) -> None:
 
             # Update progress after generation phase (generation takes the most time)
             pbar.update(0.5)
+            log_and_print(
+                f"Generated {len(poem_candidates)} poems * {config.num_candidates} candidates"
+            )
 
             # Phase 2: Score all candidates and select winners
             pbar.set_description(f"Iter {iteration + 1} [score]")
@@ -305,6 +308,10 @@ async def run_training(config: Config) -> None:
 
             # Update progress after scoring/selection phase
             pbar.update(0.25)
+            log_and_print(
+                f"Scored and selected top-{config.top_k} winners per poem "
+                f"from {config.num_candidates} candidates"
+            )
 
             # Phase 4: Train immediately on this batch's examples
             pbar.set_description(f"Iter {iteration + 1} [train]")
