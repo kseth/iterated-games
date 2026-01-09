@@ -17,13 +17,11 @@ def format_response(message: Qwen3Message) -> str:
     return message.content
 
 
-# Supported models
 SUPPORTED_MODELS = [
     "Qwen/Qwen3-8B",
     "Qwen/Qwen3-32B",
 ]
 
-# Max context length for all models
 MAX_CONTEXT_LENGTH = 32_768
 
 
@@ -41,8 +39,6 @@ def select_model(service_client: ServiceClient) -> str:
     """Display available models and let user select one."""
     capabilities = service_client.get_server_capabilities()
     available = {m.model_name for m in capabilities.supported_models if m.model_name}
-
-    # Filter to supported models that are available on the server
     models = [m for m in SUPPORTED_MODELS if m in available]
 
     if not models:
@@ -100,12 +96,10 @@ def resolve_base_model(service_client: ServiceClient, config: ReplConfig) -> str
     2. If checkpoint provided, try REST inference
     3. Fall back to interactive selection
     """
-    # Explicit model_name always wins
     if config.model_name is not None:
         validate_supported_base_model(config.model_name)
         return config.model_name
 
-    # Try to infer from checkpoint if provided
     if config.checkpoint:
         inferred = infer_base_model_from_checkpoint(service_client, config.checkpoint)
         if inferred:
@@ -113,7 +107,6 @@ def resolve_base_model(service_client: ServiceClient, config: ReplConfig) -> str
             return inferred
         print("Falling back to model selection...")
 
-    # Interactive selection
     return select_model(service_client)
 
 
@@ -138,16 +131,13 @@ def main() -> None:
     else:
         print(f"\nLoading {base_model}...")
 
-    # Get tokenizer and renderer
     renderer = Qwen3Renderer(get_qwen3_tokenizer(base_model))
 
-    # Create sampling client
     sampling_client = create_sampling_client(
         service_client, config, base_model=base_model
     )
 
-    # Sampling parameters (Qwen3 recommended: temp=0.6, top_p=0.95, top_k=20)
-    # Using larger max_tokens to allow for extended thinking
+    # Qwen3 recommended defaults; larger max_tokens for extended thinking
     sampling_params = SamplingParams(
         max_tokens=4096,
         stop=renderer.get_stop_sequences(),
@@ -156,7 +146,6 @@ def main() -> None:
         top_k=20,
     )
 
-    # Chat history and debug mode
     messages: list[Qwen3Message] = []
     debug_mode = False
 
@@ -192,14 +181,11 @@ def main() -> None:
             print(f"(debug mode: {'on' if debug_mode else 'off'})\n")
             continue
 
-        # Add user message to history
         messages.append(Qwen3Message(role=Qwen3Role.USER, content=user_input))
 
-        # Build prompt and sample
         prompt = renderer.build_generation_prompt(messages)
 
         if debug_mode:
-            # Display the prompt being sent
             prompt_text = renderer.build_generation_prompt_text(messages)
             prompt_context_used = (prompt.length / MAX_CONTEXT_LENGTH) * 100
             print(f"\n{'─' * 60}")
@@ -216,14 +202,11 @@ def main() -> None:
             num_samples=1,
         ).result()
 
-        # Parse response (extracts reasoning into separate field)
         response_tokens = output.sequences[0].tokens
         assistant_message, _parse_success = renderer.parse_response(response_tokens)
 
-        # Display formatted response
         print(f"\nAssistant: {format_response(assistant_message)}")
 
-        # Check context usage and warn if high
         total_tokens = prompt.length + len(response_tokens)
         total_context_used = (total_tokens / MAX_CONTEXT_LENGTH) * 100
 
@@ -239,7 +222,7 @@ def main() -> None:
 
         print()
 
-        # Store message in history (reasoning will be stripped on next render)
+        # Reasoning is stripped when rendering history on next turn
         messages.append(assistant_message)
 
 

@@ -3,7 +3,7 @@
 Implements the 4-phase training loop:
 1. Generate N candidate descriptions per poem
 2. Score candidates and select top-K winners
-3. Build K*2 training examples (Echo + Creative variants)
+3. Build K * 2 training examples (Echo + Creative variants)
 4. Train with LoRA using masked loss
 
 Usage:
@@ -26,7 +26,7 @@ from tqdm import tqdm
 from checkpoints import generate_run_name, save_checkpoint
 from train_config import Config
 from data import Poem, filter_poems_by_length, load_poems
-from datums import build_description_request, build_poem_request, build_training_datum
+from prompts import build_description_request, build_poem_request, build_training_datum
 from qwen3_utils import Qwen3Renderer, get_qwen3_tokenizer
 from scoring import build_idf_table, compute_mean_nll, compute_overlaps
 
@@ -75,14 +75,8 @@ GENERATION_TOP_K = 40  # Higher than chat default (20)
 GENERATION_MAX_TOKENS = 4096  # Allow space for <think> reasoning
 
 
-# ============================================================================
-# Main Training Loop
-# ============================================================================
-
-
 async def run_training(config: Config) -> None:
-    """Run the self-improving poetry training loop."""
-    # Generate run name and compute full run path
+    """Main training loop for self-improving poetry generation."""
     run_name = config.run_name or generate_run_name()
     run_path = f"{config.log_path}/{run_name}"
 
@@ -90,7 +84,6 @@ async def run_training(config: Config) -> None:
     log_and_print(f"Run: {run_name}")
     log_and_print(f"Starting training with config: {config}")
 
-    # Setup
     service_client = ServiceClient()
     tokenizer = get_qwen3_tokenizer(config.model_name)
     renderer = Qwen3Renderer(tokenizer)
@@ -108,7 +101,6 @@ async def run_training(config: Config) -> None:
         )
         return
 
-    # Build IDF table for overlap scoring
     idf_table = build_idf_table([p.content for p in poems])
 
     # Calculate total training batches for LR schedule
@@ -140,7 +132,6 @@ async def run_training(config: Config) -> None:
         else 0
     )
 
-    # Initialize training client
     if config.resume_from:
         training_client = (
             service_client.create_training_client_from_state_with_optimizer(
@@ -154,10 +145,7 @@ async def run_training(config: Config) -> None:
         )
         log_and_print(f"Starting fresh training with LoRA rank {LORA_RANK}")
 
-    # Create sampling client from current weights
     sampling_client = training_client.save_weights_and_get_sampling_client()
-
-    # Sampling params for description generation
     gen_params = SamplingParams(
         temperature=GENERATION_TEMPERATURE,
         top_p=GENERATION_TOP_P,
@@ -166,7 +154,6 @@ async def run_training(config: Config) -> None:
         stop=renderer.get_stop_sequences(),
     )
 
-    # Outer training loop
     global_batch = 0
     for iteration in range(config.max_iterations):
         log_and_print(f"=== Iteration {iteration + 1}/{config.max_iterations} ===")
@@ -211,9 +198,8 @@ async def run_training(config: Config) -> None:
                     descriptions.append(message.content)
                 poem_candidates.append((poem, descriptions))
 
-            # Phase 2: Score and select (via training_client.forward)
+            # Phase 2: Score and select
             for poem, descriptions in poem_candidates:
-                # Compute overlap scores (batch for efficiency)
                 overlaps = compute_overlaps(descriptions, poem.content, idf_table)
 
                 # Use same datum structure as training (include_title=True for scoring)
@@ -224,7 +210,6 @@ async def run_training(config: Config) -> None:
                     for desc in descriptions
                 ]
 
-                # Forward pass to get losses
                 fwd_future = await training_client.forward_async(
                     scoring_datums, "cross_entropy"
                 )
@@ -242,24 +227,20 @@ async def run_training(config: Config) -> None:
                     for loss, overlap in zip(losses, overlaps, strict=True)
                 ]
 
-                # Select top-K winners (lowest scores)
                 winner_indices = sorted(range(len(scores)), key=lambda i: scores[i])[
                     : config.top_k
                 ]
 
-                # Phase 3: Build K × 2 training examples
+                # Phase 3: Build K * 2 training examples (Echo + Creative variants)
                 for idx in winner_indices:
                     desc = descriptions[idx]
-                    # Capture first sample for logging
                     if sample_example is None:
                         sample_example = (poem.title, desc, poem.content)
-                    # Echo variant (title in prompt)
                     training_examples.append(
                         build_training_datum(
                             renderer, poem.title, desc, poem.content, include_title=True
                         )
                     )
-                    # Creative variant (no title in prompt)
                     training_examples.append(
                         build_training_datum(
                             renderer,
@@ -272,8 +253,8 @@ async def run_training(config: Config) -> None:
 
                 pbar.update(1)
 
-        # Phase 4: Train on all examples (via training_client.forward_backward)
-        random.shuffle(training_examples)  # Shuffle for better training dynamics
+        # Phase 4: Train on collected examples
+        random.shuffle(training_examples)
         pbar.set_description(f"Iter {iteration + 1} [train]")
 
         iteration_losses: list[float] = []
@@ -298,7 +279,6 @@ async def run_training(config: Config) -> None:
             fwd_bwd_result = await fwd_bwd_future.result_async()
             await optim_future.result_async()
 
-            # Track batch loss
             batch_losses = [
                 compute_mean_nll(out, datum)
                 for out, datum in zip(
@@ -308,12 +288,10 @@ async def run_training(config: Config) -> None:
             batch_loss = mean(batch_losses)
             iteration_losses.append(batch_loss)
 
-            # Update progress bar with current loss and LR
             pbar.set_postfix(loss=f"{batch_loss:.3f}", lr=f"{current_lr:.1e}")
             pbar.update(1)
             global_batch += 1
 
-            # Periodic checkpoint save
             if save_every > 0 and global_batch % save_every == 0:
                 save_checkpoint(
                     training_client=training_client,
@@ -323,7 +301,7 @@ async def run_training(config: Config) -> None:
                     config=config,
                 )
 
-            # Periodic resample: refresh sampling weights, then generate an eval sample
+            # Resample: refresh weights mid-iteration, generate eval sample
             if (
                 resample_every > 0
                 and global_batch % resample_every == 0
@@ -334,7 +312,6 @@ async def run_training(config: Config) -> None:
                 log_and_print(f"[Resample @ batch {global_batch}] Title: {title}")
                 log_and_print(f"[Resample] Description: {desc[:150]}...")
 
-                # Actually generate a poem from this description
                 eval_prompt = build_poem_request(renderer, title, desc)
                 eval_response = await sampling_client.sample_async(
                     eval_prompt, 1, gen_params
@@ -348,17 +325,15 @@ async def run_training(config: Config) -> None:
 
         pbar.close()
 
-        # Log iteration summary
         iter_mean_loss = mean(iteration_losses) if iteration_losses else 0.0
         log_and_print(
             f"Iteration {iteration + 1} complete: "
             f"loss={iter_mean_loss:.4f}, examples={len(training_examples)}"
         )
 
-        # Update sampling client with new weights for next iteration
+        # Refresh weights for next iteration
         sampling_client = training_client.save_weights_and_get_sampling_client()
 
-    # Save final checkpoint
     save_checkpoint(
         training_client=training_client,
         run_name=run_name,

@@ -19,7 +19,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Poet-themed name generator (like GitHub's funny release names)
 _ADJECTIVES = [
     "whimsical",
     "melodic",
@@ -67,6 +66,7 @@ _POETS = [
 ]
 
 
+# Poet-themed name generator (like GitHub's funny release names)
 def generate_run_name() -> str:
     """Generate a random poet-themed run name like 'whimsical-whitman-0042'."""
     adj = random.choice(_ADJECTIVES)

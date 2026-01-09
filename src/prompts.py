@@ -1,7 +1,4 @@
-"""Datum construction for poetry training.
-
-Builds tinker Datums for description generation and training with loss masking.
-"""
+"""Prompt templates and datum construction for poetry training."""
 
 from __future__ import annotations
 
@@ -12,7 +9,6 @@ from qwen3_utils import Qwen3Message, Qwen3Renderer, Qwen3Role
 # Consistent system prompt across all phases
 SYSTEM_PROMPT = "You are a poet."
 
-# Description generation prompt template
 DESCRIPTION_PROMPT_TEMPLATE = """Read this poem titled "{title}":
 
 {poem}
@@ -27,7 +23,6 @@ Your description should capture:
 
 Important: Describe the poem's essence, not its exact words. Do not quote or closely paraphrase any lines."""
 
-# Training prompt templates
 ECHO_PROMPT_TEMPLATE = """Write a poem with this title and description.
 
 Title: {title}
@@ -116,37 +111,29 @@ def build_training_datum(
     Returns:
         Datum with context tokens (weight=0) and target tokens (weight=1).
     """
-    # Build user prompt based on variant
     if include_title:
         user_content = ECHO_PROMPT_TEMPLATE.format(title=title, description=description)
     else:
         user_content = CREATIVE_PROMPT_TEMPLATE.format(description=description)
 
-    # Build target (assistant response) - same format for both variants
+    # Target format is the same for both variants
     target_content = f"Title: {title}\nPoem: {poem}"
 
-    # Create messages for the full conversation
     messages = [
         Qwen3Message(role=Qwen3Role.SYSTEM, content=SYSTEM_PROMPT),
         Qwen3Message(role=Qwen3Role.USER, content=user_content),
         Qwen3Message(role=Qwen3Role.ASSISTANT, content=target_content),
     ]
 
-    # Tokenize context (system + user + assistant header)
     context_messages = [
         Qwen3Message(role=Qwen3Role.SYSTEM, content=SYSTEM_PROMPT),
         Qwen3Message(role=Qwen3Role.USER, content=user_content),
     ]
-    context_input = renderer.build_generation_prompt(context_messages)
-    context_tokens = context_input.to_ints()
-
-    # Tokenize the full sequence
+    context_tokens = renderer.build_generation_prompt(context_messages).to_ints()
     full_tokens = renderer.build_training_sequence(messages)
 
-    # Target tokens are everything after context
+    # Target = everything after context; weights mask context (0) vs target (1)
     target_tokens = full_tokens[len(context_tokens) :]
-
-    # Build weights: 0 for context, 1 for target
     weights = [0.0] * len(context_tokens) + [1.0] * len(target_tokens)
 
     return Datum(
