@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import chz
 from tinker import SamplingClient, SamplingParams, ServiceClient
 
@@ -26,7 +24,6 @@ MAX_CONTEXT_LENGTH = 32_768
 
 
 @chz.chz
-@dataclass
 class ReplConfig:
     model_name: str | None = None
     """Base model name (e.g., 'Qwen/Qwen3-8B'). If omitted, you'll be prompted."""

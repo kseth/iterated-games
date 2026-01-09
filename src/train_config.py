@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import chz
 
 
 @chz.chz
-@dataclass
 class Config:
     """Training configuration."""
 
