@@ -93,9 +93,9 @@ def save_checkpoint(
         config: Config object for reproducibility.
         final: Whether this is the final checkpoint.
     """
-    # Simple name for tinker storage
+    # Simple name for tinker storage (no slashes - only alphanumeric, hyphens, underscores, dots)
     ckpt_suffix = "final" if final else f"batch-{batch:06d}"
-    tinker_name = f"{run_name}/{ckpt_suffix}"
+    tinker_name = f"{run_name}.{ckpt_suffix}"
 
     save_future = training_client.save_state(tinker_name)
     save_future.result()

@@ -134,18 +134,18 @@ async def run_training(config: Config) -> None:
 
     if config.resume_from:
         training_client = (
-            service_client.create_training_client_from_state_with_optimizer(
+            await service_client.create_training_client_from_state_with_optimizer_async(
                 config.resume_from
             )
         )
         log_and_print(f"Loaded weights from: {config.resume_from}")
     else:
-        training_client = service_client.create_lora_training_client(
+        training_client = await service_client.create_lora_training_client_async(
             base_model=config.model_name, rank=LORA_RANK
         )
         log_and_print(f"Starting fresh training with LoRA rank {LORA_RANK}")
 
-    sampling_client = training_client.save_weights_and_get_sampling_client()
+    sampling_client = await training_client.save_weights_and_get_sampling_client_async()
     gen_params = SamplingParams(
         temperature=GENERATION_TEMPERATURE,
         top_p=GENERATION_TOP_P,
@@ -307,7 +307,9 @@ async def run_training(config: Config) -> None:
                 and global_batch % resample_every == 0
                 and sample_example
             ):
-                sampling_client = training_client.save_weights_and_get_sampling_client()
+                sampling_client = (
+                    await training_client.save_weights_and_get_sampling_client_async()
+                )
                 title, desc, ground_truth_poem = sample_example
                 log_and_print(f"[Resample @ batch {global_batch}] Title: {title}")
                 log_and_print(f"[Resample] Description: {desc[:150]}...")
@@ -332,7 +334,9 @@ async def run_training(config: Config) -> None:
         )
 
         # Refresh weights for next iteration
-        sampling_client = training_client.save_weights_and_get_sampling_client()
+        sampling_client = (
+            await training_client.save_weights_and_get_sampling_client_async()
+        )
 
     save_checkpoint(
         training_client=training_client,

@@ -139,6 +139,9 @@ def build_training_datum(
     return Datum(
         model_input=ModelInput.from_ints(full_tokens),
         loss_fn_inputs={
-            "weights": TensorData(data=weights, dtype="float32", shape=[len(weights)])
+            "target_tokens": TensorData(
+                data=full_tokens, dtype="int64", shape=[len(full_tokens)]
+            ),
+            "weights": TensorData(data=weights, dtype="float32", shape=[len(weights)]),
         },
     )

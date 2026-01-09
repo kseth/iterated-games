@@ -49,8 +49,8 @@ pdm run tinkercheck
 Start the interactive REPL:
 
 ```bash
-pdm run repl                              # interactive model selection
-pdm run repl --checkpoint tinker://...    # load from checkpoint
+pdm run repl                            # interactive model selection
+pdm run repl checkpoint=tinker://...    # load from checkpoint
 ```
 
 Supports Qwen3-8B and Qwen3-32B with thinking mode. Commands: `/clear`, `/debug`, `/exit`.
@@ -58,8 +58,8 @@ Supports Qwen3-8B and Qwen3-32B with thinking mode. Commands: `/clear`, `/debug`
 Run the training loop:
 
 ```bash
-pdm run train                             # uses defaults from train_config.py
-pdm run train --help                      # see all options
+pdm run train                           # uses defaults from train_config.py
+pdm run train --help                    # see all options
 ```
 
 ### Other Commands
@@ -75,8 +75,8 @@ pdm run typecheck  # Type check with mypy
 Use the REPL (`pdm run repl`) to chat with base models or fine-tuned checkpoints. The model uses Qwen3's native thinking mode—you'll see `<think>` reasoning blocks before responses.
 
 Key flags:
-- `--checkpoint tinker://...` — load a trained checkpoint (base model is inferred automatically)
-- `--model_name Qwen/Qwen3-8B` — override model selection
+- `checkpoint=tinker://...` — load a trained checkpoint (base model is inferred automatically)
+- `model_name=Qwen/Qwen3-8B` — override model selection
 
 The REPL is useful for spot-checking checkpoint quality, testing prompts, and interactive experimentation.
 
@@ -85,9 +85,9 @@ The REPL is useful for spot-checking checkpoint quality, testing prompts, and in
 Use `pdm run train` to run the self-improving training loop. Each iteration generates candidate descriptions for poems, scores them by predictive utility, and trains on the winners.
 
 Key flags:
-- `--dataset_path` — path to poems JSONL
-- `--resume_from tinker://...` — resume from a checkpoint (includes optimizer state)
-- `--max_iterations` — number of passes through the dataset
+- `dataset_path=...` — path to poems JSONL
+- `resume_from=tinker://...` — resume from a checkpoint (includes optimizer state)
+- `max_iterations=N` — number of passes through the dataset
 
 Checkpoints are saved to `logs/poetry-train/<run-name>/` with auto-generated run names. See `docs/training.md` for the full algorithm description.
 

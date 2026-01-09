@@ -26,7 +26,7 @@ class Poem:
 def load_poems(path: str | Path) -> list[Poem]:
     """Load poems from a JSONL file.
 
-    Expected format: {"title": "...", "poem": "..."}
+    Expected format: {"title": "...", "content": "..."}
 
     Args:
         path: Path to the JSONL file.
@@ -35,7 +35,9 @@ def load_poems(path: str | Path) -> list[Poem]:
         List of Poem objects.
     """
     df = pd.read_json(path, lines=True)
-    return [Poem(title=row["title"], content=row["poem"]) for _, row in df.iterrows()]
+    return [
+        Poem(title=row["title"], content=row["content"]) for _, row in df.iterrows()
+    ]
 
 
 def filter_poems_by_length(
