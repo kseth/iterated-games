@@ -1,9 +1,13 @@
 """Interactive REPL for chatting with Qwen3 models via Tinker."""
 
-import tinker
-from tinker.types import SamplingParams
+from __future__ import annotations
 
-from qwen3 import Qwen3Message, Qwen3Renderer, Qwen3Role, get_qwen3_tokenizer
+from dataclasses import dataclass
+
+import chz
+from tinker import SamplingClient, SamplingParams, ServiceClient
+
+from qwen3_utils import Qwen3Message, Qwen3Renderer, Qwen3Role, get_qwen3_tokenizer
 
 
 def format_response(message: Qwen3Message) -> str:
@@ -23,7 +27,17 @@ SUPPORTED_MODELS = [
 MAX_CONTEXT_LENGTH = 32_768
 
 
-def select_model(service_client: tinker.ServiceClient) -> str:
+@chz.chz
+@dataclass
+class ReplConfig:
+    model_name: str | None = None
+    """Base model name (e.g., 'Qwen/Qwen3-8B'). If omitted, you'll be prompted."""
+
+    checkpoint: str | None = None
+    """Optional checkpoint path/name for sampling (e.g., 'tinker://...')."""
+
+
+def select_model(service_client: ServiceClient) -> str:
     """Display available models and let user select one."""
     capabilities = service_client.get_server_capabilities()
     available = {m.model_name for m in capabilities.supported_models if m.model_name}
@@ -53,19 +67,84 @@ def select_model(service_client: tinker.ServiceClient) -> str:
         print("Invalid selection, try again.")
 
 
-def main() -> None:
-    print("Connecting to Tinker...")
-    service_client = tinker.ServiceClient()
+def validate_supported_base_model(model_name: str) -> None:
+    """Raise ValueError if model_name is not in SUPPORTED_MODELS."""
+    if model_name not in SUPPORTED_MODELS:
+        raise ValueError(
+            f"Unsupported model '{model_name}'. Expected one of: {SUPPORTED_MODELS}"
+        )
 
-    # Select model
-    base_model = select_model(service_client)
-    print(f"\nLoading {base_model}...")
+
+def infer_base_model_from_checkpoint(
+    service_client: ServiceClient, checkpoint: str
+) -> str | None:
+    """Try to infer base model from checkpoint via REST API. Returns None on failure."""
+    try:
+        rest_client = service_client.create_rest_client()
+        weights_info = rest_client.get_weights_info_by_tinker_path(checkpoint).result()
+        base_model = weights_info.base_model
+        if base_model in SUPPORTED_MODELS:
+            return base_model
+        print(f"Checkpoint base model '{base_model}' not in supported models.")
+        return None
+    except Exception as e:
+        print(f"Could not infer base model from checkpoint: {e}")
+        return None
+
+
+def resolve_base_model(service_client: ServiceClient, config: ReplConfig) -> str:
+    """Resolve the base model for tokenizer/renderer.
+
+    Priority:
+    1. Explicit --model_name (validated)
+    2. If checkpoint provided, try REST inference
+    3. Fall back to interactive selection
+    """
+    # Explicit model_name always wins
+    if config.model_name is not None:
+        validate_supported_base_model(config.model_name)
+        return config.model_name
+
+    # Try to infer from checkpoint if provided
+    if config.checkpoint:
+        inferred = infer_base_model_from_checkpoint(service_client, config.checkpoint)
+        if inferred:
+            print(f"Inferred base model from checkpoint: {inferred}")
+            return inferred
+        print("Falling back to model selection...")
+
+    # Interactive selection
+    return select_model(service_client)
+
+
+def create_sampling_client(
+    service_client: ServiceClient, config: ReplConfig, *, base_model: str
+) -> SamplingClient:
+    """Create a sampling client from checkpoint or base model."""
+    if config.checkpoint:
+        return service_client.create_sampling_client(model_path=config.checkpoint)
+    return service_client.create_sampling_client(base_model=base_model)
+
+
+def main() -> None:
+    config = chz.entrypoint(ReplConfig)
+    print("Connecting to Tinker...")
+    service_client = ServiceClient()
+
+    base_model = resolve_base_model(service_client, config)
+    if config.checkpoint:
+        print(f"\nLoading checkpoint: {config.checkpoint}")
+        print(f"Tokenizer base model: {base_model}")
+    else:
+        print(f"\nLoading {base_model}...")
 
     # Get tokenizer and renderer
     renderer = Qwen3Renderer(get_qwen3_tokenizer(base_model))
 
     # Create sampling client
-    sampling_client = service_client.create_sampling_client(base_model=base_model)
+    sampling_client = create_sampling_client(
+        service_client, config, base_model=base_model
+    )
 
     # Sampling parameters (Qwen3 recommended: temp=0.6, top_p=0.95, top_k=20)
     # Using larger max_tokens to allow for extended thinking
@@ -82,7 +161,10 @@ def main() -> None:
     debug_mode = False
 
     print(f"\n{'=' * 60}")
-    print(f"Tinker REPL — {base_model}")
+    header = f"Tinker REPL — {base_model}"
+    if config.checkpoint:
+        header += f" ({config.checkpoint})"
+    print(header)
     print("Commands: /clear, /debug, /exit")
     print(f"{'=' * 60}\n")
 

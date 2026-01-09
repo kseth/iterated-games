@@ -13,7 +13,7 @@ from enum import StrEnum
 from functools import cache
 from typing import TYPE_CHECKING, Any
 
-import tinker
+from tinker import ModelInput
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
@@ -140,19 +140,45 @@ class Qwen3Renderer:
 
         return tokens
 
-    def build_generation_prompt(
-        self, messages: list[Qwen3Message]
-    ) -> tinker.ModelInput:
+    def build_generation_prompt(self, messages: list[Qwen3Message]) -> ModelInput:
         """Build a prompt for generation from a list of messages.
 
         Matches HuggingFace's Qwen3 chat template (enable_thinking=True).
         The model naturally generates <think>...</think> blocks.
         """
-        return tinker.ModelInput.from_ints(self._build_prompt_tokens(messages))
+        return ModelInput.from_ints(self._build_prompt_tokens(messages))
 
     def build_generation_prompt_text(self, messages: list[Qwen3Message]) -> str:
         """Build prompt as text (for debugging)."""
         return self.tokenizer.decode(self._build_prompt_tokens(messages))
+
+    def build_training_sequence(self, messages: list[Qwen3Message]) -> list[int]:
+        """Build a complete conversation for training (all messages fully rendered).
+
+        Unlike build_generation_prompt which leaves the assistant turn open,
+        this renders all messages including a complete assistant response with
+        the closing <|im_end|> token.
+
+        Args:
+            messages: List of messages forming the complete conversation.
+                      Should include the assistant response as the final message.
+
+        Returns:
+            List of token IDs for the full conversation.
+        """
+        tokens: list[int] = []
+
+        for idx, message in enumerate(messages):
+            maybe_newline = "\n" if idx > 0 else ""
+            header = f"{maybe_newline}<|im_start|>{message.role}\n"
+
+            # For training, use content directly (no reasoning handling)
+            content = message.content
+
+            full_str = header + content + "<|im_end|>"
+            tokens.extend(self.tokenizer.encode(full_str, add_special_tokens=False))
+
+        return tokens
 
     @property
     def _end_token(self) -> int:

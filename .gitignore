@@ -6,3 +6,5 @@ __pycache__/
 .pdm-python
 .env
 
+# Training logs and checkpoints
+/logs/

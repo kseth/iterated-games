@@ -9,8 +9,10 @@ dependencies = [
     "tinker==0.7.0",
     "transformers==4.57.3",
     "pandas==2.3.3",
-    "pandas-stubs==1.2.0.58",
     "pyarrow==22.0.0",
+    "chz==0.4.0",
+    "snowballstemmer==3.0.1",
+    "tqdm==4.67.1",
 ]
 requires-python = "==3.13.*"
 readme = "README.md"
@@ -19,7 +21,9 @@ license = {text = "MIT"}
 [dependency-groups]
 dev = [
     "ruff==0.14.10",
-    "mypy==1.19.1"
+    "mypy==1.19.1",
+    "pandas-stubs==1.2.0.58",
+    "types-tqdm==4.67.0.20250809",
 ]
 
 [tool.pdm]
@@ -32,3 +36,4 @@ lint = "ruff check --fix src/"
 typecheck = "mypy src/"
 tinkercheck = "python src/tinker_check.py"
 repl = "python src/repl.py"
+train = "python src/train.py"

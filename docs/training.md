@@ -64,11 +64,14 @@ Prompt design (protective):
 - Instruct the model to describe the poem at a high level without copying phrasing.
 
 Core instructions (adapt to your model's format):
-> Write a short description that would help someone write this poem.
-> Rules:
-> - Do not quote the poem.
-> - Do not reuse distinctive phrases or sequences of words from the poem.
-> - Prefer themes, imagery, tone, structure, and constraints (e.g., rhyme, meter) over exact wording.
+> Write a description (under 150 words) that would allow a poet to write this poem without seeing it.
+> Your description should capture:
+> - The core emotion or insight
+> - The imagery and sensory details
+> - The tone and voice
+> - The arc or movement of the poem
+>
+> Important: Describe the poem's essence, not its exact words. Do not quote or closely paraphrase any lines.
 
 Sampling: Generate `N` candidates (e.g., `N = 4`) using high temperature to encourage diversity.
 
@@ -93,7 +96,7 @@ We use a combined heuristic rather than hard filtering. The goal is to prefer de
    - Use per-token (average) prediction loss for utility.
    - Tune a single “overlap weight” globally so overlap matters, but doesn’t dominate.
 
-4. Combined score: Rank candidates by a single combined score that rewards low prediction loss and penalizes high overlap. Lower is better. The overlap weight controls how strongly overlap is penalized.
+4. Combined score: Rank candidates by `score = loss + overlap_weight × overlap`. Lower is better. The overlap weight (e.g., 0.1) controls how strongly overlap is penalized relative to prediction loss.
 
 5. Select the best few: Keep the top `K` candidates under that combined score (e.g., `K = 2`). Selecting multiple winners captures synonymous descriptions and increases data diversity.
 
@@ -337,3 +340,35 @@ FOR iteration IN 1..MAX_ITERATIONS:
 ```
 
 Each iteration uses the improved model to generate better descriptions, creating a positive feedback loop.
+
+---
+
+## 7. Implementation Notes
+
+The `src/train.py` implementation makes several practical choices beyond the core algorithm:
+
+### Fine-Tuning
+
+We use **LoRA** (rank 32) rather than full fine-tuning. This reduces memory and makes checkpoints lightweight while still providing sufficient capacity for the poetry domain.
+
+### Learning Rate Schedule
+
+Linear decay from `1e-4` to `5e-5` over all training batches. The schedule is computed upfront based on dataset size and iteration count.
+
+### Intra-Iteration Resampling
+
+The sampling client can be refreshed *during* an iteration (controlled by `evals_per_iteration`). This means later poems in the same iteration benefit from training updates on earlier poems—a tighter feedback loop than waiting for the full iteration to complete.
+
+### Thinking Blocks
+
+For Qwen3 thinking models, `<think>` reasoning is allowed during description generation, but we extract only the final content (stripping reasoning) before using the description for scoring and training.
+
+### Checkpointing
+
+- Run names are auto-generated with a poet theme (e.g., `whimsical-whitman-0042`)
+- Checkpoints include optimizer state for exact resume via `--resume_from`
+- Metadata is saved locally alongside Tinker state for debugging
+
+### Poem Filtering
+
+Long poems are filtered out before training (default: 6144 tokens max) to ensure sequences fit within context limits and training remains efficient.
