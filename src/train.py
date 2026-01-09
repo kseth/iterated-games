@@ -188,13 +188,14 @@ async def run_training(config: Config) -> None:
             training_examples: list[Datum] = []
             first_poem_sampled = False  # Track first poem in this mini-batch
 
-            # Generate/score in score_batch_size sub-chunks to limit parallel sampling
+            # Phase 1: Generate N candidates per poem (in score_batch_size chunks)
+            pbar.set_description(f"Iter {iteration + 1} [generate]")
+            pbar.refresh()
+            poem_candidates: list[tuple[Poem, list[str]]] = []
             for score_batch_tuple in batched(
                 train_batch_poems, config.score_batch_size
             ):
                 score_batch = list(score_batch_tuple)
-
-                # Phase 1: Generate N candidates per poem (parallel async)
                 prompts = [
                     build_description_request(renderer, p.title, p.content)
                     for p in score_batch
@@ -208,7 +209,6 @@ async def run_training(config: Config) -> None:
                 all_responses = await asyncio.gather(*sample_tasks)
 
                 # Extract descriptions (strip <think> reasoning)
-                poem_candidates: list[tuple[Poem, list[str]]] = []
                 for poem, resp in zip(score_batch, all_responses, strict=True):
                     descriptions = []
                     for seq in resp.sequences:
@@ -216,35 +216,61 @@ async def run_training(config: Config) -> None:
                         descriptions.append(message.content)
                     poem_candidates.append((poem, descriptions))
 
-                # Phase 2: Score and select winners
-                for poem, descriptions in poem_candidates:
-                    overlaps = compute_overlaps(descriptions, poem.content, idf_table)
+            # Update progress after generation phase (generation takes the most time)
+            pbar.update(0.5)
 
-                    # Use same datum structure as training (include_title=True for scoring)
-                    scoring_datums = [
+            # Phase 2: Score all candidates and select winners
+            pbar.set_description(f"Iter {iteration + 1} [score]")
+            pbar.refresh()
+
+            # Build all scoring datums
+            scoring_datums: list[Datum] = []
+            overlaps: list[float] = []
+
+            for poem, descriptions in poem_candidates:
+                # Compute overlap penalty (penalizes descriptions that copy the poem)
+                poem_overlaps = compute_overlaps(descriptions, poem.content, idf_table)
+
+                # Build datums for all candidates of this poem
+                # Use include_title=True (Echo format) for scoring to match training
+                for desc in descriptions:
+                    scoring_datums.append(
                         build_training_datum(
                             renderer, poem.title, desc, poem.content, include_title=True
                         )
-                        for desc in descriptions
-                    ]
-
-                    fwd_future = await training_client.forward_async(
-                        scoring_datums, "cross_entropy"
                     )
-                    result = await fwd_future
-                    losses = [
-                        compute_mean_nll(out, datum)
-                        for out, datum in zip(
-                            result.loss_fn_outputs, scoring_datums, strict=True
-                        )
-                    ]
+                    overlaps.append(poem_overlaps[descriptions.index(desc)])
+
+            # Single forward pass for all scoring datums (batched for efficiency)
+            if scoring_datums:
+                fwd_future = await training_client.forward_async(
+                    scoring_datums, "cross_entropy"
+                )
+                result = await fwd_future
+                losses = [
+                    compute_mean_nll(loss_fn_output, datum)
+                    for loss_fn_output, datum in zip(
+                        result.loss_fn_outputs, scoring_datums, strict=True
+                    )
+                ]
+
+                # Process each poem's candidates and select winners
+                datum_idx = 0
+                for poem, descriptions in poem_candidates:
+                    next_datum_idx = datum_idx + config.num_candidates
+                    poem_losses = losses[datum_idx:next_datum_idx]
+                    poem_overlaps = overlaps[datum_idx:next_datum_idx]
+                    datum_idx = next_datum_idx
 
                     # Combined score: loss + overlap_weight * overlap (lower is better)
                     scores = [
                         loss + config.overlap_weight * overlap
-                        for loss, overlap in zip(losses, overlaps, strict=True)
+                        for loss, overlap in zip(
+                            poem_losses, poem_overlaps, strict=True
+                        )
                     ]
 
+                    # Select top_k winners per poem (lowest combined score)
                     winner_indices = sorted(
                         range(len(scores)), key=lambda i: scores[i]
                     )[: config.top_k]
@@ -277,7 +303,12 @@ async def run_training(config: Config) -> None:
                             )
                         )
 
+            # Update progress after scoring/selection phase
+            pbar.update(0.25)
+
             # Phase 4: Train immediately on this batch's examples
+            pbar.set_description(f"Iter {iteration + 1} [train]")
+            pbar.refresh()
             total_examples_this_iter += len(training_examples)
             random.shuffle(training_examples)
 
@@ -317,13 +348,13 @@ async def run_training(config: Config) -> None:
 
                 global_step += 1
 
-            # Update progress after processing this mini-batch of poems
+            # Update progress after training phase
             pbar.set_postfix(
                 loss=f"{iteration_losses[-1]:.3f}" if iteration_losses else "N/A",
                 lr=f"{current_lr:.1e}",
                 poems=len(train_batch_poems),
             )
-            pbar.update(1)
+            pbar.update(0.25)
 
             # Log step details to file
             if iteration_losses:
