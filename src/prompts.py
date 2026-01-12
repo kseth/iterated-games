@@ -9,19 +9,19 @@ from qwen3_utils import Qwen3Message, Qwen3Renderer, Qwen3Role
 # Consistent system prompt across all phases
 SYSTEM_PROMPT = "You are a poet."
 
-DESCRIPTION_PROMPT_TEMPLATE = """Read this poem titled "{title}":
+DESCRIPTION_GENERATION_TEMPLATE = """Read this poem titled "{title}":
 
 {poem}
 
-Write a description (under 150 words) that would allow a poet to write this poem without seeing it.
+In about 100 words, describe what this poem is really about. 
 
-Your description should capture:
-- The core emotion or insight
-- The imagery and sensory details
-- The tone and voice
-- The arc or movement of the poem
+Write the description like you would write notes or a brief sketch. It should capture:
+- Core emotions or insights
+- Any imagery or sensory details
+- The mood, tone, or voice
+- Structure or progression in the poem
 
-Important: Describe the poem's essence, not its exact words. Do not quote or closely paraphrase any lines."""
+Important: Describe the poem's essence in a way that would allow a poet to create it without seeing it. However, do not quote or copy any lines."""
 
 ECHO_PROMPT_TEMPLATE = """Write a poem with this title and description.
 
@@ -56,7 +56,7 @@ def build_description_request(
     Returns:
         ModelInput ready for sampling.
     """
-    user_content = DESCRIPTION_PROMPT_TEMPLATE.format(title=title, poem=poem)
+    user_content = DESCRIPTION_GENERATION_TEMPLATE.format(title=title, poem=poem)
 
     messages = [
         Qwen3Message(role=Qwen3Role.SYSTEM, content=SYSTEM_PROMPT),
