@@ -159,18 +159,21 @@ Adapt these templates to your model's native chat format (e.g., Qwen3's `<|im_st
 
 ### Loss Masking Strategy
 
-We use standard causal language modeling loss, but only compute loss on the *target* portion of each sequence:
+We use standard causal language modeling loss (cross-entropy), but only compute loss on the *target* portion of each sequence:
 
 | Region | Contributes to Loss? | Rationale |
 |--------|----------------------|-----------|
 | Input context | No | This is provided at inference; we don't need to train generation here. |
+| Reasoning tokens | No | We stub out empty reasoning tokens to match the model's expected format, but mask them from loss since we only care about the final output. |
 | Title | Yes | The model learns to infer appropriate titles from the description. |
 | Poem | Yes | Core generation target. |
 
 The boundary between context and target depends on format:
 - Base models: The `Output:` delimiter (or similar) marks the boundary.
 - Chat models: The assistant turn start marks the boundary (context = system + user turns).
-- Thinking models: Decide whether reasoning tokens contribute to loss. A common choice is to mask thinking and only train on final output.
+- Thinking models: We include empty reasoning tokens (`<think>...</think>`) in the target sequence to match the model's expected format, but mask them with weight=0 so they don't contribute to loss. Only the actual content (Title + Poem) contributes to loss.
+
+**Why cross-entropy instead of GRPO/PPO?** For reasoning models, we could use reinforcement learning (GRPO/PPO) which would naturally handle reasoning tokens by generating full sequences and computing rewards. However, cross-entropy is faster for proof-of-concept work: it uses a single forward pass for scoring and forward-backward pass for training, rather than requiring full sequence generation and reward computation. The reasoning token stubbing approach allows us to use efficient cross-entropy training while still matching the model's expected format.
 
 ### Scoring Details
 
@@ -324,6 +327,8 @@ The sampling client can be refreshed *during* an iteration (controlled by `evals
 ### Thinking Blocks
 
 For Qwen3 thinking models, `<think>` reasoning is allowed during description generation, but we extract only the final content (stripping reasoning) before using the description for scoring and training.
+
+During training and scoring, we include empty reasoning tokens (`<think>...</think>`) in the target sequence to match the model's expected format, but mask them from loss computation. This ensures the model sees the reasoning tokens it expects (avoiding penalties for expecting them) while only computing loss on the actual content we care about (Title + Poem).
 
 ### Checkpointing
 
