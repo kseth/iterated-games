@@ -46,7 +46,7 @@ We adapt this insight to poetry by treating the description as a “missing” p
 
 Finally, [*Singh et al. (2023)*](https://arxiv.org/abs/2312.06585) describe a simple pattern for scaling self-training: generate multiple candidates, score them with an automated signal, then fine-tune on the best ones—repeat. Their results show that this kind of “generate → score → train” loop can keep paying off as you scale model size and training compute. In our setting, the automated signal is straightforward: how well a candidate description helps the model predict the target poem.
 
-Together, these techniques form our training loop: backtranslate a description from each poem, score candidates by predictive utility (STaR-style) while discouraging copying via an overlap penalty, and fine-tune on the winners (rejection-sampling style). Each iteration improves both the model's ability to *generate* useful descriptions and to *follow* them when writing poetry.
+Together, these techniques form our training loop: backtranslate a description from each poem, score candidates by predictive utility (STaR-style), and fine-tune on the winners (rejection-sampling style). Each iteration improves both the model's ability to *generate* useful descriptions and to *follow* them when writing poetry.
  
 
 ---
@@ -85,20 +85,13 @@ The model is essentially "reverse-engineering" instructions: given the output (a
 
 Not all generated descriptions are useful. We score and rank candidates by their *predictive utility*—how much they help the model anticipate the actual poem.
 
-We use a combined heuristic rather than hard filtering. The goal is to prefer descriptions that are (a) useful for predicting the poem, while (b) not simply re-stating the poem text.
+Scoring process:
 
-1. Utility signal (primary): For each candidate description, measure how well the model can predict the poem when given `Title + Description` as context. Use the model’s standard token-level prediction loss (averaged per token). Lower loss means the description provides more useful context.
+1. **Utility signal**: For each candidate description, measure how well the model can predict the poem when given `Title + Description` as context. Use the model's standard token-level prediction loss (averaged per token). Lower loss means the description provides more useful context.
 
-2. Overlap penalty (soft): Compute an overlap score between the description and the poem text. Higher overlap indicates the description is closer to copying (or heavily echoing) the poem. This complements the protective prompt: the prompt asks nicely; the overlap penalty enforces.
+2. **Selection**: Rank candidates by their prediction loss (lower is better) and keep the top `K` candidates (e.g., `K = 2`). Selecting multiple winners captures synonymous descriptions and increases data diversity.
 
-3. Keep scales stable (small-N friendly): With only a few candidates per poem (e.g., ~5), don’t rely on fancy per-poem normalization. Instead:
-   - Keep the overlap score naturally bounded (for example, between 0 and 1).
-   - Use per-token (average) prediction loss for utility.
-   - Tune a single “overlap weight” globally so overlap matters, but doesn’t dominate.
-
-4. Combined score: Rank candidates by `score = loss + overlap_weight × overlap`. Lower is better. The overlap weight (e.g., 0.1) controls how strongly overlap is penalized relative to prediction loss.
-
-5. Select the best few: Keep the top `K` candidates under that combined score (e.g., `K = 2`). Selecting multiple winners captures synonymous descriptions and increases data diversity.
+The protective prompt (from Phase 1) encourages the model to avoid copying, and the loss-based selection naturally favors descriptions that provide useful predictive context rather than simply restating the poem text.
 
 ### Phase 3: Training Example Construction
 
@@ -182,21 +175,9 @@ The boundary between context and target depends on format:
 - Chat models: The assistant turn start marks the boundary (context = system + user turns).
 - Thinking models: Decide whether reasoning tokens contribute to loss. A common choice is to mask thinking and only train on final output.
 
-### Overlap Signal (for Sampling)
+### Scoring Details
 
-The overlap penalty can be computed in a few ways. A good default is an IDF-weighted overlap, which down-weights common words and up-weights rare ones.
-
-- Build an IDF table (offline, once): Treat each poem as a document. For each word, count how many poems contain it. Assign higher weight to words that appear in fewer poems (rare words), and lower weight to words that appear everywhere (common words).
-- Compute overlap (per candidate): Use a length-insensitive measure such as cosine similarity between TF-IDF vectors, or a simpler “weighted overlap fraction,” like: “what fraction of the description’s weighted words also appear in the poem?”
-
-### Scaling the Combined Score
-
-To make the combined score behave consistently, ensure the two parts are comparable:
-
-- Use bounded overlap: Define the overlap signal so it lives in a stable range (often 0 to 1).
-- Use per-token loss: Use average token-level prediction loss (not total loss) so poem length doesn’t dominate.
-- Calibrate the overlap weight globally (recommended for small N): Pick a single overlap weight using a small held-out slice (or recent batches) so that overlap can break ties, but doesn’t overwhelm the utility signal.
-- Tune with diagnostics: Track (a) average overlap of selected descriptions and (b) average prediction loss of selected descriptions. Increase the overlap weight if overlap stays high; decrease it if selection starts preferring low-overlap but unhelpful descriptions.
+Candidates are scored using average token-level prediction loss (total loss divided by number of tokens, not total loss) to ensure fair comparison across descriptions of different lengths. The top `K` candidates with lowest loss are selected as winners.
 
 ---
 
@@ -213,7 +194,7 @@ The model starts from its initial weights—whether base pre-trained, instructio
 ### Iteration 1+: Refinement
 
 1. Generate: The model proposes descriptions for each `(title, poem)` pair.
-2. Select: We keep descriptions that score well under the combined heuristic (low prediction loss and low overlap penalty).
+2. Select: We keep descriptions that score well by prediction loss (lower loss = more useful description).
 3. Train: The model fine-tunes on winning `(description, poem)` pairs.
 4. Repeat: The improved model generates better descriptions in the next iteration.
 
@@ -253,23 +234,18 @@ FUNCTION train_iteration(dataset, model, renderer, config):
         # ─── PHASE 2: SCORING & SELECTION ───
         scored = []
         FOR EACH description IN candidates:
-            # Primary term: how well the description helps predict the poem
+            # Score by how well the description helps predict the poem
             context = renderer.format_poem_context(title, description)
             target = renderer.format_poem_target(title, poem)
-            loss = model.evaluate_loss(context, target)
-
-            # Soft leakage penalty: overlap between description and poem
-            overlap = compute_overlap(description, poem, idf=config.idf)
-
-            scored.append((loss, overlap, description))
+            loss = model.evaluate_loss(context, target)  # Average token-level loss
+            
+            scored.append((loss, description))
         
-        # Combine the two signals:
-        # - loss should be average token-level prediction loss
-        # - overlap should be a bounded score (often 0..1)
+        # Select top-K candidates by lowest loss
         winners = top_k(
             scored,
             k=config.K,
-            key = (loss, overlap, _) => combine(loss, overlap, overlap_weight=config.overlap_weight)
+            key = (loss, _) => loss  # Lower loss is better
         )
         
         # ─── PHASE 3: TRAINING EXAMPLE CONSTRUCTION ───
@@ -305,9 +281,7 @@ FUNCTION train_iteration(dataset, model, renderer, config):
 |-----------|-------------|
 | `renderer.format_*(...)` | Adapts prompts/examples to model's native format (raw completion, chat template, etc.). |
 | `model.generate(prompt, num_samples, temperature)` | Sample multiple completions from the model with diversity. |
-| `model.evaluate_loss(context, target)` | Compute how well the model predicts `target` given `context` (lower = better). |
-| `compute_overlap(description, poem, idf)` | Overlap score between description and poem (higher = more overlap). Common: IDF-weighted cosine similarity. |
-| `combine(loss, overlap, overlap_weight)` | Combine utility (loss) and overlap into a single score for ranking candidates. |
+| `model.evaluate_loss(context, target)` | Compute how well the model predicts `target` given `context` (lower = better). Returns average token-level loss. |
 | `top_k(items, k, key)` | Return the `k` items with lowest value of `key`. |
 | `model.finetune(examples, loss_on)` | Update model weights; only compute loss on the specified region. |
 

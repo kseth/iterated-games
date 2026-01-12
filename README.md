@@ -82,7 +82,7 @@ The REPL is useful for spot-checking checkpoint quality, testing prompts, and in
 
 ## Training
 
-Use `pdm run train` to run the self-improving training loop. Each iteration generates candidate descriptions for poems, scores them by predictive utility, and trains on the winners.
+Use `pdm run train` to run the self-improving training loop. Each iteration generates candidate descriptions for poems, scores them by how well they help predict the target poem (lower loss = better), and trains on the top-K winners.
 
 Key flags:
 - `dataset_path=...` — path to poems JSONL

@@ -33,9 +33,6 @@ class Config:
     top_k: int = 2
     """K: winners to keep per poem."""
 
-    overlap_weight: float = 0.1
-    """Weight for overlap penalty in scoring."""
-
     score_batch_size: int = 32
     """Poems per batch during generate/score."""
 

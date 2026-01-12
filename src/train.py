@@ -31,7 +31,7 @@ from checkpoints import generate_run_name, save_checkpoint_async
 from data import Poem, filter_poems_by_length, load_poems
 from prompts import build_description_request, build_poem_request, build_training_datum
 from qwen3_utils import Qwen3Renderer, get_qwen3_tokenizer
-from scoring import build_idf_table, compute_mean_nll, compute_overlaps
+from scoring import compute_mean_nll
 from train_config import Config
 
 logger = logging.getLogger(__name__)
@@ -101,8 +101,6 @@ async def run_training(config: Config) -> None:
     if not poems:
         log_and_print("No poems found after filtering.", "error")
         return
-
-    idf_table = build_idf_table([p.content for p in poems])
 
     # Calculate batch sizes
     # Each poem produces top_k * 2 training examples (Echo + Creative)
@@ -228,12 +226,8 @@ async def run_training(config: Config) -> None:
 
             # Build all scoring datums
             scoring_datums: list[Datum] = []
-            overlaps: list[float] = []
 
             for poem, descriptions in poem_candidates:
-                # Compute overlap penalty (penalizes descriptions that copy the poem)
-                poem_overlaps = compute_overlaps(descriptions, poem.content, idf_table)
-
                 # Build datums for all candidates of this poem
                 # Use include_title=True (Echo format) for scoring to match training
                 for desc in descriptions:
@@ -242,7 +236,6 @@ async def run_training(config: Config) -> None:
                             renderer, poem.title, desc, poem.content, include_title=True
                         )
                     )
-                    overlaps.append(poem_overlaps[descriptions.index(desc)])
 
             # Single forward pass for all scoring datums (batched for efficiency)
             if scoring_datums:
@@ -262,20 +255,11 @@ async def run_training(config: Config) -> None:
                 for poem, descriptions in poem_candidates:
                     next_datum_idx = datum_idx + config.num_candidates
                     poem_losses = losses[datum_idx:next_datum_idx]
-                    poem_overlaps = overlaps[datum_idx:next_datum_idx]
                     datum_idx = next_datum_idx
 
-                    # Combined score: loss + overlap_weight * overlap (lower is better)
-                    scores = [
-                        loss + config.overlap_weight * overlap
-                        for loss, overlap in zip(
-                            poem_losses, poem_overlaps, strict=True
-                        )
-                    ]
-
-                    # Select top_k winners per poem (lowest combined score)
+                    # Select top_k winners per poem (lowest loss)
                     winner_indices = sorted(
-                        range(len(scores)), key=lambda i: scores[i]
+                        range(len(poem_losses)), key=lambda i: poem_losses[i]
                     )[: config.top_k]
 
                     # Phase 3: Build K * 2 training examples (Echo + Creative variants)
