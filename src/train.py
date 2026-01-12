@@ -6,7 +6,7 @@ in mini-batches rather than all-generation-then-all-training:
 For each mini-batch of poems:
 1. Generate N candidate descriptions per poem
 2. Score candidates and select top-K winners
-3. Build K * 2 training examples (Echo + Creative variants)
+3. Build K training examples
 4. Train immediately on these examples
 
 Usage:
@@ -103,16 +103,15 @@ async def run_training(config: Config) -> None:
         return
 
     # Calculate batch sizes
-    # Each poem produces top_k * 2 training examples (Echo + Creative)
+    # Each poem produces top_k training examples
     winners_per_poem = min(config.top_k, config.num_candidates)
-    examples_per_poem = winners_per_poem * 2
-    poems_per_train_batch = max(1, config.train_batch_size // examples_per_poem)
+    poems_per_train_batch = max(1, config.train_batch_size // winners_per_poem)
 
     # Total steps for LR schedule (one step = one mini-batch of poems trained)
     steps_per_iteration = math.ceil(len(poems) / poems_per_train_batch)
     total_steps = config.max_iterations * steps_per_iteration
     log_and_print(
-        f"Interleaved training: {poems_per_train_batch} poems -> ~{poems_per_train_batch * examples_per_poem} examples per train step"
+        f"Interleaved training: {poems_per_train_batch} poems -> ~{poems_per_train_batch * winners_per_poem} examples per train step"
     )
     log_and_print(
         f"LR schedule: {START_LR} -> {END_LR} over {total_steps} steps "
@@ -229,12 +228,9 @@ async def run_training(config: Config) -> None:
 
             for poem, descriptions in poem_candidates:
                 # Build datums for all candidates of this poem
-                # Use include_title=True (Echo format) for scoring to match training
                 for desc in descriptions:
                     scoring_datums.append(
-                        build_training_datum(
-                            renderer, poem.title, desc, poem.content, include_title=True
-                        )
+                        build_training_datum(renderer, desc, poem.title, poem.content)
                     )
 
             # Single forward pass for all scoring datums (batched for efficiency)
@@ -262,31 +258,19 @@ async def run_training(config: Config) -> None:
                         range(len(poem_losses)), key=lambda i: poem_losses[i]
                     )[: config.top_k]
 
-                    # Phase 3: Build K * 2 training examples (Echo + Creative variants)
+                    # Phase 3: Build K training examples
                     for idx in winner_indices:
                         desc = descriptions[idx]
                         # Update sample_example to first example from current mini-batch
                         if not first_poem_sampled:
                             sample_example = (poem.title, desc, poem.content)
                             first_poem_sampled = True
-                        # Echo variant (title in prompt)
                         training_examples.append(
                             build_training_datum(
                                 renderer,
-                                poem.title,
                                 desc,
-                                poem.content,
-                                include_title=True,
-                            )
-                        )
-                        # Creative variant (no title in prompt)
-                        training_examples.append(
-                            build_training_datum(
-                                renderer,
                                 poem.title,
-                                desc,
                                 poem.content,
-                                include_title=False,
                             )
                         )
 
@@ -378,7 +362,7 @@ async def run_training(config: Config) -> None:
                     log_and_print(f"[Resample @ step {global_step}] Title: {title}")
                     log_and_print(f"[Resample] Description: {desc[:150]}...")
 
-                    eval_prompt = build_poem_request(renderer, title, desc)
+                    eval_prompt = build_poem_request(renderer, desc)
                     eval_response = await sampling_client.sample_async(
                         eval_prompt, 1, gen_params
                     )

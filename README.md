@@ -95,7 +95,7 @@ Checkpoints are saved to `logs/poetry-train/<run-name>/` with auto-generated run
 
 The `docs/` directory contains design notes and training writeups.
 
-- `docs/training.md`: The current architecture for *self-improving poetry generation*. This is where we track the end-to-end training loop (candidate description generation, scoring/selection, data construction, and how we train the final `(title?, description) -> (title, poem)` behavior).
+- `docs/training.md`: The current architecture for *self-improving poetry generation*. This is where we track the end-to-end training loop (candidate description generation, scoring/selection, data construction, and how we train the final `description -> (title, poem)` behavior).
 
 ## License
 

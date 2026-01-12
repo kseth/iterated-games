@@ -12,16 +12,16 @@ We have a dataset of `(title, poem)` pairs, but no *descriptions* explaining wha
 
 Rather than annotate descriptions by hand, we have the model generate them, then filter for quality:
 
-1. Generate candidate descriptions for each title.
-2. Evaluate descriptions by how much they help the model predict the actual poem (lower training loss = more useful description).
-3. Train on the winning `(description, poem)` pairs, so the model learns both to follow descriptions and to infer appropriate titles.
+1. Generate candidate descriptions for each `(title, poem)` pair.
+2. Evaluate descriptions by how much they help the model predict the target (title and poem) (lower training loss = more useful description).
+3. Train on the winning `(description, (title, poem))` pairs, so the model learns both to follow descriptions and to infer appropriate titles.
 
 This creates a self-improvement loop: better descriptions lead to better training signal, which produces a model that generates even better descriptions.
 
 ### Design Goals
 
-- Flexible inference: Support generation with *or* without a user-provided title. When given a title, echo it; when given only a description, infer an appropriate title.
-- Data efficiency: Extract maximum signal from each example via Top-K selection (multiple winners per poem) and format augmentation (multiple input formats per winner).
+- Flexible inference: Support generation from description alone, where the model infers an appropriate title and the poem's content based on the description.
+- Data efficiency: Extract maximum signal from each example via Top-K selection (multiple winners per poem).
 - No external dependencies: The model is both teacher and student—no separate reward model or human labeling required.
 
 ### Model Compatibility
@@ -44,7 +44,7 @@ The core challenge we face—possessing `(title, poem)` pairs without intermedia
 
 We adapt this insight to poetry by treating the description as a “missing” piece of supervision that we can recover. For each `(title, poem)` pair, we ask the model to write a description *conditioned on the poem itself* (so it can be specific and accurate), but we make the prompt explicitly protective: the description should not copy lines or distinctive phrasing from the poem. This is where [*STaR (Zelikman et al., 2022)*](https://arxiv.org/abs/2203.14465) becomes relevant. STaR establishes that a model can bootstrap its capabilities by generating many candidates, selecting the ones that succeed under an objective signal, and training on the successful paths. The key insight is that even "accidental" successes contain learnable signal—the model improves by studying *what worked*, not just *what was intended*.
 
-Finally, [*Singh et al. (2023)*](https://arxiv.org/abs/2312.06585) describe a simple pattern for scaling self-training: generate multiple candidates, score them with an automated signal, then fine-tune on the best ones—repeat. Their results show that this kind of “generate → score → train” loop can keep paying off as you scale model size and training compute. In our setting, the automated signal is straightforward: how well a candidate description helps the model predict the target poem.
+Finally, [*Singh et al. (2023)*](https://arxiv.org/abs/2312.06585) describe a simple pattern for scaling self-training: generate multiple candidates, score them with an automated signal, then fine-tune on the best ones—repeat. Their results show that this kind of "generate → score → train" loop can keep paying off as you scale model size and training compute. In our setting, the automated signal is straightforward: how well a candidate description helps the model predict the target (title and poem).
 
 Together, these techniques form our training loop: backtranslate a description from each poem, score candidates by predictive utility (STaR-style), and fine-tune on the winners (rejection-sampling style). Each iteration improves both the model's ability to *generate* useful descriptions and to *follow* them when writing poetry.
  
@@ -64,14 +64,15 @@ Prompt design (protective):
 - Instruct the model to describe the poem at a high level without copying phrasing.
 
 Core instructions (adapt to your model's format):
-> Write a description (under 150 words) that would allow a poet to write this poem without seeing it.
-> Your description should capture:
-> - The core emotion or insight
-> - The imagery and sensory details
-> - The tone and voice
-> - The arc or movement of the poem
+> In about 100 words, describe what this poem is really about.
 >
-> Important: Describe the poem's essence, not its exact words. Do not quote or closely paraphrase any lines.
+> Write the description like you would write notes or a brief sketch. It should capture:
+> - Core emotions or insights
+> - Any imagery or sensory details
+> - The mood, tone, or voice
+> - Structure or progression in the poem
+>
+> Important: Describe the poem's essence in a way that would allow a poet to create it without seeing it. However, do not quote or copy any lines.
 
 Sampling: Generate `N` candidates (e.g., `N = 4`) using high temperature to encourage diversity.
 
@@ -83,11 +84,11 @@ The model is essentially "reverse-engineering" instructions: given the output (a
 
 ### Phase 2: Scoring & Selection
 
-Not all generated descriptions are useful. We score and rank candidates by their *predictive utility*—how much they help the model anticipate the actual poem.
+Not all generated descriptions are useful. We score and rank candidates by their *predictive utility*—how much they help the model anticipate the target (title and poem).
 
 Scoring process:
 
-1. **Utility signal**: For each candidate description, measure how well the model can predict the poem when given `Title + Description` as context. Use the model's standard token-level prediction loss (averaged per token). Lower loss means the description provides more useful context.
+1. **Utility signal**: For each candidate description, measure how well the model can predict the target (title and poem) when given the description as context. Use the model's standard token-level prediction loss (averaged per token). Lower loss means the description provides more useful context.
 
 2. **Selection**: Rank candidates by their prediction loss (lower is better) and keep the top `K` candidates (e.g., `K = 2`). Selecting multiple winners captures synonymous descriptions and increases data diversity.
 
@@ -95,14 +96,13 @@ The protective prompt (from Phase 1) encourages the model to avoid copying, and 
 
 ### Phase 3: Training Example Construction
 
-Each winning description becomes the basis for training examples. To support flexible inference, we create two variants per winner:
+Each winning description becomes the basis for a training example. The model learns to infer an appropriate title and the poem's content from the description alone:
 
-| Variant | Use Case | Input | Target |
-|---------|----------|-------|--------|
-| Echo | User provides a title | Title + Description | Title + Poem |
-| Creative | User provides only a description | Description | Title + Poem |
+| Input | Target |
+|-------|--------|
+| Description | Title + Poem |
 
-The Echo variant trains the model to follow descriptions when a title is given. The Creative variant trains the model to *infer* an appropriate title from the description alone—useful when users want the model to choose its own title.
+The model is trained to generate both the title and poem from a description, which allows it to learn title and content relationships based on descriptions and ground truth.
 
 ### Phase 4: Optimization
 
@@ -120,17 +120,15 @@ Training sequences need a clear boundary between input context (what the model i
 
 #### Conceptual Structure
 
-| Mode | Input Context | Generation Target |
-|------|---------------|-------------------|
-| Echo (title provided) | Title + Description | Title + Poem |
-| Creative (title omitted) | Description only | Title + Poem |
+| Input Context | Generation Target |
+|---------------|-------------------|
+| Description only | Title + Poem |
 
 #### Format Examples
 
 Base model (raw completion):
 
 ```
-Title: {T}
 Description: {D}
 
 Output:
@@ -143,9 +141,8 @@ The `Output:` marker serves as the generation trigger.
 Instruction-tuned model (chat format):
 
 ```
-[System] You are a poet. Given a title and description, write the poem.
-[User] Title: {T}
-Description: {D}
+[System] You are a poet.
+[User] Description: {D}
 [Assistant] Title: {T}
 Poem: {P}
 ```
@@ -167,8 +164,8 @@ We use standard causal language modeling loss, but only compute loss on the *tar
 | Region | Contributes to Loss? | Rationale |
 |--------|----------------------|-----------|
 | Input context | No | This is provided at inference; we don't need to train generation here. |
-| Title (in target) | Yes | In Creative mode, the model must learn to infer appropriate titles. |
-| Poem (in target) | Yes | Core generation target. |
+| Title | Yes | The model learns to infer appropriate titles from the description. |
+| Poem | Yes | Core generation target. |
 
 The boundary between context and target depends on format:
 - Base models: The `Output:` delimiter (or similar) marks the boundary.
@@ -195,7 +192,7 @@ The model starts from its initial weights—whether base pre-trained, instructio
 
 1. Generate: The model proposes descriptions for each `(title, poem)` pair.
 2. Select: We keep descriptions that score well by prediction loss (lower loss = more useful description).
-3. Train: The model fine-tunes on winning `(description, poem)` pairs.
+3. Train: The model fine-tunes on winning `(description, (title, poem))` pairs.
 4. Repeat: The improved model generates better descriptions in the next iteration.
 
 ### Why This Works
@@ -234,8 +231,8 @@ FUNCTION train_iteration(dataset, model, renderer, config):
         # ─── PHASE 2: SCORING & SELECTION ───
         scored = []
         FOR EACH description IN candidates:
-            # Score by how well the description helps predict the poem
-            context = renderer.format_poem_context(title, description)
+            # Score by how well the description helps predict the target (title and poem)
+            context = renderer.format_poem_context(description)
             target = renderer.format_poem_target(title, poem)
             loss = model.evaluate_loss(context, target)  # Average token-level loss
             
@@ -250,19 +247,10 @@ FUNCTION train_iteration(dataset, model, renderer, config):
         
         # ─── PHASE 3: TRAINING EXAMPLE CONSTRUCTION ───
         FOR EACH description IN winners:
-            # Echo variant: user provides title
+            # Model infers title from description
             training_examples.append(
                 renderer.format_training_example(
-                    title=title, description=description, poem=poem,
-                    include_title_in_context=True
-                )
-            )
-            
-            # Creative variant: user omits title
-            training_examples.append(
-                renderer.format_training_example(
-                    title=title, description=description, poem=poem,
-                    include_title_in_context=False
+                    description=description, title=title, poem=poem
                 )
             )
     
@@ -290,11 +278,11 @@ FUNCTION train_iteration(dataset, model, renderer, config):
 The `renderer` abstracts away format differences. Example implementations:
 
 Base model renderer:
-- `format_poem_context(T, D)` → `"Title: {T}\nDescription: {D}\n\nOutput:\n"`
+- `format_poem_context(D)` → `"Description: {D}\n\nOutput:\n"`
 - `format_poem_target(T, P)` → `"Title: {T}\nPoem: {P}"`
 
 Chat model renderer (e.g., Qwen3):
-- `format_poem_context(T, D)` → `[System: "You are a poet.", User: "Title: {T}\nDescription: {D}"]`
+- `format_poem_context(D)` → `[System: "You are a poet.", User: "Description: {D}"]`
 - `format_poem_target(T, P)` → `[Assistant: "Title: {T}\nPoem: {P}"]`
 
 The renderer handles chat templates, special tokens, and thinking blocks as needed.

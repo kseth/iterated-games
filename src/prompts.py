@@ -23,16 +23,7 @@ Write the description like you would write notes or a brief sketch. It should ca
 
 Important: Describe the poem's essence in a way that would allow a poet to create it without seeing it. However, do not quote or copy any lines."""
 
-ECHO_PROMPT_TEMPLATE = """Write a poem with this title and description.
-
-Title: {title}
-Description: {description}
-
-Respond with the title and poem in this format:
-Title: <title>
-Poem: <poem>"""
-
-CREATIVE_PROMPT_TEMPLATE = """Write a poem based on this description. Choose an appropriate title.
+POEM_PROMPT_TEMPLATE = """Write a poem based on this description. Choose an appropriate title.
 
 Description: {description}
 
@@ -68,20 +59,18 @@ def build_description_request(
 
 def build_poem_request(
     renderer: Qwen3Renderer,
-    title: str,
     description: str,
 ) -> ModelInput:
     """Build a prompt for generating poems (for evaluation).
 
     Args:
         renderer: The Qwen3 renderer for tokenization.
-        title: The poem title (used in Echo variant prompt).
         description: The description to generate from.
 
     Returns:
         ModelInput ready for sampling.
     """
-    user_content = ECHO_PROMPT_TEMPLATE.format(title=title, description=description)
+    user_content = POEM_PROMPT_TEMPLATE.format(description=description)
 
     messages = [
         Qwen3Message(role=Qwen3Role.SYSTEM, content=SYSTEM_PROMPT),
@@ -93,30 +82,24 @@ def build_poem_request(
 
 def build_training_datum(
     renderer: Qwen3Renderer,
-    title: str,
     description: str,
+    title: str,
     poem: str,
-    include_title: bool,
 ) -> Datum:
     """Create a training datum with proper loss masking.
 
     Args:
         renderer: The Qwen3 renderer for tokenization.
-        title: The poem title.
-        description: The candidate description.
-        poem: The poem content.
-        include_title: If True, use Echo format (title in prompt).
-                      If False, use Creative format (no title in prompt).
+        description: The candidate description (input).
+        title: The poem title (target).
+        poem: The poem content (target).
 
     Returns:
         Datum with context tokens (weight=0) and target tokens (weight=1).
     """
-    if include_title:
-        user_content = ECHO_PROMPT_TEMPLATE.format(title=title, description=description)
-    else:
-        user_content = CREATIVE_PROMPT_TEMPLATE.format(description=description)
+    user_content = POEM_PROMPT_TEMPLATE.format(description=description)
 
-    # Target format is the same for both variants
+    # Target format: Title + Poem
     target_content = f"Title: {title}\nPoem: {poem}"
 
     messages = [
