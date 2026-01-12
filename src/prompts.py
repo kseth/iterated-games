@@ -88,6 +88,8 @@ def build_training_datum(
 ) -> Datum:
     """Create a training datum with proper loss masking.
 
+    Includes static reasoning tokens for reasoning models, but masks them from loss.
+
     Args:
         renderer: The Qwen3 renderer for tokenization.
         description: The candidate description (input).
@@ -95,29 +97,40 @@ def build_training_datum(
         poem: The poem content (target).
 
     Returns:
-        Datum with context tokens (weight=0) and target tokens (weight=1).
+        Datum with context tokens (weight=0), reasoning tokens (weight=0),
+        and target content tokens (weight=1).
     """
     user_content = POEM_PROMPT_TEMPLATE.format(description=description)
 
     # Target format: Title + Poem
     target_content = f"Title: {title}\nPoem: {poem}"
 
-    messages = [
-        Qwen3Message(role=Qwen3Role.SYSTEM, content=SYSTEM_PROMPT),
-        Qwen3Message(role=Qwen3Role.USER, content=user_content),
-        Qwen3Message(role=Qwen3Role.ASSISTANT, content=target_content),
-    ]
-
     context_messages = [
         Qwen3Message(role=Qwen3Role.SYSTEM, content=SYSTEM_PROMPT),
         Qwen3Message(role=Qwen3Role.USER, content=user_content),
     ]
     context_tokens = renderer.build_generation_prompt(context_messages).to_ints()
-    full_tokens = renderer.build_training_sequence(messages)
 
-    # Target = everything after context; weights mask context (0) vs target (1)
-    target_tokens = full_tokens[len(context_tokens) :]
-    weights = [0.0] * len(context_tokens) + [1.0] * len(target_tokens)
+    # Build assistant turn tokens (context_tokens already includes <|im_start|>assistant\n)
+    # This is just sample reasoning content -- in practice, the model will generate its own reasoning.
+    reasoning_content = "I am thinking and writing a poem."
+    assistant_reasoning = f"<think>\n{reasoning_content}\n</think>\n"
+    assistant_content = target_content + "<|im_end|>"
+
+    assistant_reasoning_tokens = renderer.tokenizer.encode(
+        assistant_reasoning, add_special_tokens=False
+    )
+    assistant_content_tokens = renderer.tokenizer.encode(assistant_content, add_special_tokens=False)
+
+    # Build full sequence: context (includes assistant header) + reasoning + content
+    full_tokens = context_tokens + assistant_reasoning_tokens + assistant_content_tokens
+
+    # Compute weights: context (0), reasoning (0), content (1)
+    weights = (
+        [0.0] * len(context_tokens)
+        + [0.0] * len(assistant_reasoning_tokens)
+        + [1.0] * len(assistant_content_tokens)
+    )
 
     return Datum(
         model_input=ModelInput.from_ints(full_tokens),
