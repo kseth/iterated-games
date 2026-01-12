@@ -1,4 +1,8 @@
-"""Interactive REPL for chatting with Qwen3 models via Tinker."""
+"""Interactive REPL for chatting with Qwen3 models via Tinker.
+
+Usage:
+    pdm run repl
+"""
 
 from __future__ import annotations
 

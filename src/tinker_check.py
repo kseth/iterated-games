@@ -1,3 +1,11 @@
+"""Check if Tinker can be connected to. If so, list available models.
+
+Usage:
+    pdm run tinkercheck
+"""
+
+from __future__ import annotations
+
 from tinker import ServiceClient
 
 
